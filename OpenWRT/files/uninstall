@@ -1,0 +1,30 @@
+#!/bin/sh
+# Takes SYN Mirror off this router completely: its rules, its service, its page in LuCI, its settings - every file it installed.
+# The button Uninstall of its page runs it, and `sh install.sh remove`. Meetings going on end with their rules.
+
+# the rules and the service first: nothing of them stays in the kernel
+/etc/init.d/syn-mirror stop >/dev/null 2>&1
+/etc/init.d/syn-mirror disable >/dev/null 2>&1
+[ -x /usr/libexec/syn-mirror/rules ] && /usr/libexec/syn-mirror/rules unload
+nft delete table ip syn_mirror 2>/dev/null
+
+# installed as packages of OpenWrt: the package manager takes them away, as it knows them
+if command -v apk >/dev/null; then
+	for p in luci-app-syn-mirror syn-mirror; do apk info -e "$p" >/dev/null 2>&1 && apk del "$p" >/dev/null 2>&1; done
+elif command -v opkg >/dev/null; then
+	for p in luci-app-syn-mirror syn-mirror; do opkg status "$p" 2>/dev/null | grep -q installed && opkg remove "$p" >/dev/null 2>&1; done
+fi
+
+# every file, whichever way it came
+rm -rf /usr/libexec/syn-mirror /usr/share/syn-mirror
+rm -f /etc/init.d/syn-mirror /etc/rc.d/*syn-mirror /etc/config/syn-mirror \
+	/usr/share/nftables.d/chain-pre/forward/30-syn-mirror.nft \
+	/www/luci-static/resources/view/syn-mirror.js /usr/share/luci/menu.d/luci-app-syn-mirror.json \
+	/usr/share/rpcd/acl.d/luci-app-syn-mirror.json /usr/libexec/rpcd/syn-mirror
+
+# LuCI and rpcd forget the page; fw4 drops the include of the meetings
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache/* 2>/dev/null
+/etc/init.d/rpcd reload >/dev/null 2>&1
+[ -n "$(nft list tables 2>/dev/null | grep 'inet fw4')" ] && fw4 -q reload
+logger -t syn-mirror "SYN Mirror is removed"
+echo "SYN Mirror is removed, its settings too"

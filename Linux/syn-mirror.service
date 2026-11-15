@@ -1,0 +1,20 @@
+[Unit]
+Description=SYN Mirror: the meeting of two TCP connections in the NAT of this computer
+# after whatever loads the firewall: their rules first, then these
+After=network-online.target nftables.service iptables.service firewalld.service ufw.service docker.service
+Wants=network-online.target
+
+[Service]
+# the rules, then `give`, which answers the requests for a port; a reload loads the rules again and `give` reads the settings
+# again - the meetings going on go on
+Type=simple
+EnvironmentFile=/etc/syn-mirror.conf
+ExecStartPre=/usr/libexec/syn-mirror/rules load ${PASSWORD} ${FIRST} ${LAST} ${WAIT} ${TRIES} ${BLOCK} ${GUARD} ${SHORT} ${GUESSES}
+ExecStart=/usr/bin/perl /usr/libexec/syn-mirror/give.pl
+ExecReload=/usr/libexec/syn-mirror/rules load ${PASSWORD} ${FIRST} ${LAST} ${WAIT} ${TRIES} ${BLOCK} ${GUARD} ${SHORT} ${GUESSES}
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStopPost=/usr/libexec/syn-mirror/rules unload
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,49 @@
+#!/bin/sh /etc/rc.common
+# SYN Mirror: rules in the kernel, loaded with the values of /etc/config/syn-mirror, and `give`, which answers the requests for a
+# port. A change of the settings - LuCI, `uci commit` and `reload_config` - loads them again by the trigger, and procd starts
+# `give` again; the meetings going on go on.
+
+START=95
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	config_load syn-mirror
+	local enabled password first last wait tries block guard short guesses
+	config_get_bool enabled main enabled 1
+	if [ "$enabled" != 1 ]; then
+		/usr/libexec/syn-mirror/rules unload
+		return 0
+	fi
+	config_get password main password
+	config_get first main first 40000
+	config_get last main last 49999
+	config_get wait main wait 60
+	config_get tries main tries 5
+	config_get block main block 600
+	config_get_bool guard main guard 1
+	config_get short main short 20
+	config_get guesses main guesses 5
+	/usr/libexec/syn-mirror/rules load "$password" "$first" "$last" "$wait" "$tries" "$block" "$guard" "$short" "$guesses" 2>&1 | logger -t syn-mirror
+	procd_open_instance
+	procd_set_param command /usr/bin/ucode /usr/libexec/syn-mirror/give.uc
+	# it reads the settings itself: a change of them starts it again, and so does its new code, put by an update
+	procd_set_param file /etc/config/syn-mirror /usr/libexec/syn-mirror/give.uc
+	procd_set_param respawn
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	/usr/libexec/syn-mirror/rules unload
+}
+
+# loading replaces the rules as they are, and procd starts `give` again only when the settings changed: no stop first - it would
+# take the rules away from the meetings going on
+restart() {
+	start
+}
+
+service_triggers() {
+	procd_add_reload_trigger syn-mirror
+}

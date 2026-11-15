@@ -1,0 +1,14 @@
+{
+	"admin/services/syn-mirror": {
+		"title": "SYN Mirror",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "syn-mirror"
+		},
+		"depends": {
+			"acl": [ "luci-app-syn-mirror" ],
+			"uci": { "syn-mirror": true }
+		}
+	}
+}

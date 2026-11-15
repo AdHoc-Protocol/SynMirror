@@ -1,0 +1,11 @@
+# the scripts and rules run on the router or on a Linux computer: lines end in LF there
+OpenWRT/** text eol=lf
+Linux/** text eol=lf
+# and those that make and check the installers of one file, in the sh of Git on Windows too
+pack.sh text eol=lf
+.github/** text eol=lf
+# the server: the script of Linux and macOS in LF, those of Windows in CRLF - Windows PowerShell 5.1 reads its script as UTF-8 by
+# the mark at its start
+Server/*.pl text eol=lf
+Server/*.ps1 text eol=crlf
+Server/*.cmd text eol=crlf

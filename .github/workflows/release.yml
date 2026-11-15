@@ -1,0 +1,86 @@
+# The release of a tag v…: pack.sh makes the installers of one file, syn-mirror-openwrt.sh and syn-mirror-linux.sh; each installs
+# SYN Mirror where it is for - OpenWrt booted in Docker as a router ( ../openwrt-install.sh ), this Ubuntu with systemd and Debian
+# without ( ../linux-install.sh ) - and then both go into the release of the tag. The links
+#   https://github.com/AdHoc-Protocol/SynMirror/releases/latest/download/syn-mirror-openwrt.sh
+#   https://github.com/AdHoc-Protocol/SynMirror/releases/latest/download/syn-mirror-linux.sh
+# are always the last ones. The server without RemoteDesk goes beside them: syn-mirror-server.pl for Linux and macOS, and
+# syn-mirror-server-windows.zip - the script of PowerShell and the .cmd that starts it by a double click.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  openwrt:
+    runs-on: ubuntu-latest
+    # a feed of OpenWrt that hangs does not hold the release for hours
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: pack
+        run: |
+          sh pack.sh openwrt syn-mirror-openwrt.sh
+          sh -n syn-mirror-openwrt.sh
+
+      # the last release of OpenWrt, and its snapshot: what the next release brings shows here first
+      - name: install on OpenWrt
+        run: |
+          docker network create --subnet 10.97.0.0/24 router
+          for image in openwrt/rootfs:x86-64-openwrt-25.12 openwrt/rootfs:x86-64; do
+            echo "::group::$image"
+            docker run -d --name router --network router --ip 10.97.0.2 --cap-add NET_ADMIN --cap-add SYS_ADMIN \
+              --sysctl net.ipv4.ip_forward=1 -v "$PWD:/src:ro" "$image" /sbin/init
+            sleep 8
+            docker exec router sh /src/.github/openwrt-install.sh
+            docker rm -f router
+            echo "::endgroup::"
+          done
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: pack
+        run: |
+          sh pack.sh linux syn-mirror-linux.sh
+          sh -n syn-mirror-linux.sh
+
+      # this computer: Ubuntu with systemd, iptables and Docker, as a server is
+      - name: install with systemd
+        run: |
+          sudo apt-get install -y nftables >/dev/null
+          sudo sh .github/linux-install.sh syn-mirror-linux.sh
+
+      # Debian in Docker: no systemd, the rules loaded and `give` started by the installer itself
+      - name: install without systemd
+        run: |
+          docker run --rm --cap-add NET_ADMIN -v "$PWD:/src:ro" debian:latest sh -c \
+            'apt-get update >/dev/null && apt-get install -y --no-install-recommends nftables iptables procps >/dev/null && cd /src && sh .github/linux-install.sh syn-mirror-linux.sh'
+
+  release:
+    needs: [openwrt, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sh pack.sh openwrt syn-mirror-openwrt.sh
+          sh pack.sh linux syn-mirror-linux.sh
+          cp Server/syn-mirror-server.pl .
+          (cd Server && zip -q ../syn-mirror-server-windows.zip syn-mirror-server.ps1 syn-mirror-server.cmd)
+          files="syn-mirror-openwrt.sh syn-mirror-linux.sh syn-mirror-server.pl syn-mirror-server-windows.zip"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" $files --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" $files --title "SYN Mirror $GITHUB_REF_NAME" --generate-notes
+          fi

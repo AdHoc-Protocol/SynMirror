@@ -1,0 +1,23 @@
+# the benches in Docker: kept by the author, not published
+test/
+
+# the packages of the drawing of the pictures: npm install puts them back
+docs/draw/node_modules/
+docs/draw/package-lock.json
+
+# editors and systems
+.idea/
+.vscode/
+.vs/
+.fleet/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# leftovers
+*.log
+*.tmp
+*.bak
+*.swp
+*~

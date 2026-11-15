@@ -1,0 +1,13 @@
+{
+	"luci-app-syn-mirror": {
+		"description": "Grant access to SYN Mirror",
+		"read": {
+			"ubus": { "syn-mirror": [ "address", "status" ] },
+			"uci": [ "syn-mirror" ]
+		},
+		"write": {
+			"ubus": { "syn-mirror": [ "uninstall" ] },
+			"uci": [ "syn-mirror" ]
+		}
+	}
+}

@@ -1,0 +1,127 @@
+#!/bin/sh
+# The rules of SYN Mirror in the kernel: `rules load <password> <first port> <last port> <wait seconds> <tries> <block seconds>
+# <guard 1|0> <short seconds> <guesses>` loads the table
+# syn_mirror, turns on the forwarding of packets and lets the meetings, and the requests for a port to the first port, through the
+# firewall there is - fw4 of OpenWrt, the FORWARD and INPUT chains of iptables ( Docker, ufw ); `rules unload` takes them away.
+# The init script of OpenWrt and the service of systemd call it; anything else can too.
+
+TABLE=/usr/share/syn-mirror/syn-mirror.nft
+# fw4: its forward and input chains take these files in
+FW4=/usr/share/nftables.d/chain-pre/forward/30-syn-mirror.nft
+FW4_IN=/usr/share/nftables.d/chain-pre/input/30-syn-mirror.nft
+# iptables: the rule at the top of its FORWARD chain
+MEETINGS='-m connmark --mark 0x08000000/0x08000000 -m comment --comment syn-mirror -j ACCEPT'
+
+# writes the file of fw4 when it says other than the line; 0 - written
+include() {
+	[ -f "$1" ] && [ "$(cat "$1")" = "$2" ] && return 1
+	mkdir -p "$(dirname "$1")"
+	printf '%s\n' "$2" > "$1"
+}
+
+# takes away the rules of SYN Mirror from the INPUT chain of iptables: the port of requests in them may be another
+input_off() {
+	iptables -S INPUT 2>/dev/null | grep -- '--comment syn-mirror' | sed 's/^-A //' | while read -r rule; do
+		eval "iptables -D $rule"
+	done
+}
+
+reload_fw4() { [ -n "$(nft list tables 2>/dev/null | grep 'inet fw4')" ] && fw4 -q reload; }
+
+# the bytes of stdin in hex: hexdump on OpenWrt, od elsewhere
+hex() {
+	if command -v hexdump >/dev/null; then hexdump -v -e '/1 "%02x"'
+	else od -An -v -tx1 | tr -d ' \n'
+	fi
+}
+
+iptables_on() { command -v iptables >/dev/null && iptables -S FORWARD >/dev/null 2>&1; }
+
+# the elements of a set of the table there is, as a command that adds them anew - their time full again: the ports given and their
+# ids live on through a load, as their sides will not ask again
+kept() {
+	nft list set ip syn_mirror "$1" 2>/dev/null | awk -v set="$1" '
+		/elements = \{/ { on = 1; sub(/.*elements = \{/, "") }
+		on { all = all " " $0; if (index($0, "}")) on = 0 }
+		END {
+			sub(/\}.*/, "", all)
+			n = split(all, it, ",")
+			for (i = 1; i <= n; i++) {
+				sub(/ (timeout|expires) .*/, "", it[i]); gsub(/^ +| +$/, "", it[i])
+				if (it[i] != "") s = s (s == "" ? "" : ", ") it[i]
+			}
+			if (s != "") print "add element ip syn_mirror " set " { " s " }"
+		}'
+}
+
+case "$1" in
+load)
+	password=$2 first=${3:-40000} last=${4:-49999} wait=${5:-60} tries=${6:-5} block=${7:-600} guard=${8:-1} short=${9:-20} guesses=${10:-5}
+	if [ "${#password}" -ne 8 ]; then
+		echo "the password must be 8 characters" >&2
+		exit 1
+	fi
+	case "$first$last$wait$tries$block$guard$short$guesses" in
+	*[!0-9]*)
+		echo "the ports, wait, tries, block, guard, short and guesses must be numbers" >&2
+		exit 1
+		;;
+	esac
+	if [ "$first" -ge "$last" ]; then
+		echo "the first port answers requests, the others are of meeting: the last port must be above the first" >&2
+		exit 1
+	fi
+	# the ports and their ids, when the table there is gives them to ids too: of SYN Mirror before the ids, the ports given are
+	# kept alone, and free again in `wait` seconds
+	keep=$(kept given; nft list set ip syn_mirror owned 2>/dev/null | grep -q '@ih,64,64' && kept owned; kept holder; kept guessing)
+	# the guard off, or no short meeting allowed at all: its lines left out
+	off=
+	if [ "$guard" = 0 ] || [ "$guesses" = 0 ]; then off='/# guard$/d'; fi
+	[ "$short" -gt 0 ] || short=20
+	# one transaction: the old table goes as the new one comes - no packet in between unruled; a table that fails leaves the old
+	{
+		echo 'add table ip syn_mirror'
+		echo 'delete table ip syn_mirror'
+		sed -e "s/@WAIT@/${wait}s/g" -e "s/@BLOCK@/${block}s/g" -e "s/@TRIES@/$tries/g" -e "s/@SHORT@/${short}s/g" -e "s/@GUESSES@/$guesses/g" "$TABLE" | if [ -n "$off" ]; then sed "$off"; else cat; fi
+		[ -n "$keep" ] && printf '%s\n' "$keep"
+	} | nft -D password=0x$(printf %s "$password" | hex) -D ports=$first-$last -D asks=$first -f - || exit 1
+	# a router forwards already; a computer starts to
+	if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ] && ! echo 1 > /proc/sys/net/ipv4/ip_forward; then
+		echo "cannot turn on the forwarding of packets" >&2
+		exit 1
+	fi
+	if command -v fw4 >/dev/null; then
+		# the requests come to the input chain only with the right password: the rest the table drops before
+		a=0 b=0
+		include "$FW4" 'ct mark & 0x08000000 == 0x08000000 accept comment "!syn-mirror: the meetings"' && a=1
+		include "$FW4_IN" "udp dport $first accept comment \"!syn-mirror: the requests for a port\"" && b=1
+		[ $a$b != 00 ] && reload_fw4
+	fi
+	if iptables_on; then
+		if ! iptables -C FORWARD $MEETINGS 2>/dev/null; then
+			iptables -I FORWARD 1 $MEETINGS || exit 1
+		fi
+		if ! iptables -C INPUT -p udp --dport "$first" -m comment --comment syn-mirror -j ACCEPT 2>/dev/null; then
+			input_off
+			iptables -I INPUT 1 -p udp --dport "$first" -m comment --comment syn-mirror -j ACCEPT || exit 1
+		fi
+	fi
+	exit 0
+	;;
+unload)
+	nft delete table ip syn_mirror 2>/dev/null
+	if [ -f "$FW4" ] || [ -f "$FW4_IN" ]; then
+		rm -f "$FW4" "$FW4_IN"
+		reload_fw4
+	fi
+	if iptables_on; then
+		while iptables -D FORWARD $MEETINGS 2>/dev/null; do :; done
+		input_off
+	fi
+	exit 0
+	;;
+*)
+	echo "usage: $0 load <password> <first port> <last port> <wait seconds> <tries> <block seconds> [<guard 1|0> <short seconds> <guesses>] | unload" >&2
+	exit 2
+	;;
+esac

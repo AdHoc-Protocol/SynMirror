@@ -1,0 +1,11 @@
+{
+  "name": "syn-mirror-pictures",
+  "private": true,
+  "description": "Draws the pictures of the README of SYN Mirror: node draw.mjs",
+  "type": "module",
+  "dependencies": {
+    "@fontsource/coming-soon": "latest",
+    "jsdom": "latest",
+    "roughjs": "latest"
+  }
+}
