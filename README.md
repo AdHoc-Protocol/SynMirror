@@ -182,6 +182,22 @@ How to read a line:
   Several are separated by commas, `…@S1:40000,Hx4nT7wAe2Kq9VsM@S2:40000`: when the first does not answer, the next is asked.
 - **The client's line** is only the address of the meeting point and the port: what any program dials.
 
+The rules every program keeps alike:
+
+| Part | Rule |
+|:--|:--|
+| password, key, read key | exactly 16 letters and digits |
+| meeting point, S | a name or an IPv4 address: no `:` `@` `=` `,` or space in it |
+| port | 1…65535. None after the meeting point of an `@` line, or after S: 40000. A fixed port always names its port |
+| spaces | around the line and around each `read key@S:port` they go; inside a part they are an error |
+
+The line is one form for all who take it: both scripts of the server, `rdp-host --meet` of
+[RemoteDesk](https://github.com/AdHoc-Protocol/RemoteDesk), a DeFreez host. The cases
+are in [`docs/lines.tsv`](docs/lines.tsv): a line, and what it is, or `error`. Each of them reads a copy of that file in its tests;
+`sh .github/lines.sh` runs it through both scripts here ( `perl syn-mirror-server.pl --parse <line>`,
+`syn-mirror-server.ps1 -Parse <line>` print what they make of a line ). A program of your own that takes lines does it right when it
+makes of each case what the file says.
+
 ## Fixed ports
 
 A port given at each start makes a new line for the client at each start of the server. A fixed port does not: the client

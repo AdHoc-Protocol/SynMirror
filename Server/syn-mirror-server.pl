@@ -122,14 +122,16 @@ sub point {
     my ($key, $mark, $rest) = $t =~ /^([^\s@=]*)([@=])(.*)$/ ? ($1, $2, $3) : (undef, '@', $t);
     my %p = (key => (defined $key && $key ne '' ? $key : undef), fixed => $mark eq '=');
     if ($rest =~ /@/) {
-        for (split /,/, $rest) {
+        for (split /,/, $rest, -1) {
             my ($read, $keeper, $asks) = /^\s*([A-Za-z0-9]{16})@([^\s:@=,]+)(?::(\d+))?\s*$/ or return;
+            return if defined $asks && ($asks < 1 || $asks > 65535);
             push @{$p{reads}}, [$read, $keeper, $asks // 40000];
         }
         return \%p;
     }
     my ($host, $port) = $rest =~ /^([^\s:@=,]+)(?::(\d+))?$/ or return;
     return if $p{fixed} && !defined $port;
+    return if defined $port && ($port < 1 || $port > 65535);
     @p{qw(host port)} = ($host, $port // 40000);
     return \%p;
 }
@@ -143,6 +145,17 @@ sub rest_of {
 
 # The keys of reading hidden, for the screen.
 sub hidden { (my $t = $_[0] // '') =~ s/[A-Za-z0-9]{16}@/****************@/g; return $t }
+
+# A password or a key: 16 letters and digits.
+sub key_ok { ($_[0] // '') =~ /^[A-Za-z0-9]{16}\z/ }
+
+# What a whole line is, as docs/lines.tsv writes it - the key, @ or =, where -, or `error`: what every program takes alike.
+sub parsed {
+    my $p = point($_[0]);
+    return 'error' unless $p && key_ok($p->{key});
+    my $where = rest_of($p) =~ s/^[@=]//r;
+    return "$p->{key} " . ($p->{fixed} ? '=' : '@') . " $where";
+}
 
 my $LINES = 'such as Tr7kQ2xZp4Lm9sWd@router.example.org:40000, Fx2pL8wNq7Rk3mZa=router.example.org:41000 - a fixed port -, or Tr7kQ2xZp4Lm9sWd@Rk8mP2qLx3Vb7NtY@203.0.113.7:40000 - its address read there';
 
@@ -193,9 +206,9 @@ sub menu {
         say('💡', 'warn', "As its owner gave it - $LINES - or a name or an address, and :port when its owner gave one");
     }
     my $what = $p->{fixed} ? 'The key of its fixed port' : 'Its password';
-    until (defined $p->{key} && length $p->{key} == 16) {
-        $p->{key} = line("$what, 16 characters:");
-        say('💡', 'warn', $p->{fixed} ? 'The key of a fixed port is 16 characters' : 'The password of a meeting point is 16 characters') unless length $p->{key} == 16;
+    until (key_ok($p->{key})) {
+        $p->{key} = line("$what, 16 letters and digits:");
+        say('💡', 'warn', $p->{fixed} ? 'The key of a fixed port is 16 letters and digits' : 'The password of a meeting point is 16 letters and digits') unless key_ok($p->{key});
     }
     $k->{service} = $service;
     $k->{forward} = $forward if $service == 5;
@@ -212,6 +225,7 @@ my ($forward, $given);
 while (my $a = shift @ARGV) {
     if ($a eq '--forward') { $forward = target(shift(@ARGV) // '') or die "--forward <port> or <address:port>, such as 22 or 192.168.1.5:80\n" }
     elsif ($a eq '--meet') { $given = shift @ARGV }
+    elsif ($a eq '--parse') { print parsed(shift(@ARGV) // ''), "\n"; exit 0 } # what it makes of a line: docs/lines.tsv
     else {
         print "perl syn-mirror-server.pl [--meet <the line of the meeting point> --forward <port> | <address:port>]\n",
             "  the line as its owner gave it: <password>\@<meeting point>[:40000], <key>=<meeting point>:<fixed port>, or either\n",
@@ -229,7 +243,7 @@ if (!defined $forward || !defined $given) {
     ($forward, $given) = menu();
 }
 my $p = point($given);
-die "--meet <the line of the meeting point>, $LINES\n" unless $p && defined $p->{key} && length $p->{key} == 16;
+die "--meet <the line of the meeting point>, $LINES\n" unless $p && key_ok($p->{key});
 my $fixed = $p->{fixed};
 my $rdp = $forward =~ /:$RDP$/;
 

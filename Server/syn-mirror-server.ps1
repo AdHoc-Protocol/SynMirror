@@ -13,7 +13,7 @@
 # reading - Tr7kQ2xZp4Lm9sWd@Rk8mP2qLx3Vb7NtY@203.0.113.7:40000,Hx4nT7wAc5Jd2QeL@198.51.100.9:40000 -, and the address is read
 # there, again every 30 s. Windows PowerShell 5.1, as Windows has it, or PowerShell 7: nothing to install.
 
-param([string]$Meet, [string]$Forward)
+param([string]$Meet, [string]$Forward, [string]$Parse)
 
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
@@ -106,7 +106,10 @@ function Point([string]$t) {
         foreach ($r in $rest -split ',') {
             if ($r.Trim() -cnotmatch '^([A-Za-z0-9]{16})@([^\s:@=,]+)(?::(\d+))?$') { return $null }
             $asks = 40000
-            if ($Matches[3]) { $asks = [int]$Matches[3] }
+            if ($Matches[3]) {
+                if ($Matches[3].Length -gt 5 -or [int]$Matches[3] -lt 1 -or [int]$Matches[3] -gt 65535) { return $null }
+                $asks = [int]$Matches[3]
+            }
             $reads += , @($Matches[1], $Matches[2], $asks)
         }
         $p.reads = $reads
@@ -115,8 +118,23 @@ function Point([string]$t) {
     if ($rest -notmatch '^([^\s:@=,]+)(?::(\d+))?$') { return $null }
     if ($p.fixed -and -not $Matches[2]) { return $null }
     $p.host = $Matches[1]
-    if ($Matches[2]) { $p.port = [int]$Matches[2] }
+    if ($Matches[2]) {
+        if ($Matches[2].Length -gt 5 -or [int]$Matches[2] -lt 1 -or [int]$Matches[2] -gt 65535) { return $null }
+        $p.port = [int]$Matches[2]
+    }
     return $p
+}
+
+# A password or a key: 16 letters and digits.
+function Key-Ok([string]$k) { return $k -cmatch '^[A-Za-z0-9]{16}$' }
+
+# What a whole line is, as docs/lines.tsv writes it - the key, @ or =, where -, or `error`: what every program takes alike.
+function Parsed([string]$t) {
+    $p = Point $t
+    if (-not $p -or -not (Key-Ok $p.key)) { return 'error' }
+    $mark = '@'
+    if ($p.fixed) { $mark = '=' }
+    return "$($p.key) $mark $((Rest-Of $p) -replace '^[@=]', '')"
 }
 
 # The line without its key, as the menu keeps it: = first for a fixed port, @ first when the address is read.
@@ -131,6 +149,9 @@ function Rest-Of($p) {
 function Hidden([string]$t) { return $t -creplace '[A-Za-z0-9]{16}@', '****************@' }
 
 $Lines = 'such as Tr7kQ2xZp4Lm9sWd@router.example.org:40000, Fx2pL8wNq7Rk3mZa=router.example.org:41000 - a fixed port -, or Tr7kQ2xZp4Lm9sWd@Rk8mP2qLx3Vb7NtY@203.0.113.7:40000 - its address read there'
+
+# what it makes of a line, and nothing more: docs/lines.tsv
+if ($PSBoundParameters.ContainsKey('Parse')) { Parsed $Parse; exit 0 }
 
 # ── the menu, when nothing was given ──
 
@@ -180,10 +201,10 @@ function Menu {
     $meet = Rest-Of $p
     $key = $p.key
     if (-not $key -and $meet -eq $k.meet) { $key = $k.password }
-    while (-not $key -or $key.Length -ne 16) {
-        if ($p.fixed) { $key = Read-Line 'The key of its fixed port, 16 characters:' } else { $key = Read-Line 'Its password, 16 characters:' }
-        if ($key.Length -ne 16) {
-            if ($p.fixed) { Say '💡' warn 'The key of a fixed port is 16 characters' } else { Say '💡' warn 'The password of a meeting point is 16 characters' }
+    while (-not (Key-Ok $key)) {
+        if ($p.fixed) { $key = Read-Line 'The key of its fixed port, 16 letters and digits:' } else { $key = Read-Line 'Its password, 16 letters and digits:' }
+        if (-not (Key-Ok $key)) {
+            if ($p.fixed) { Say '💡' warn 'The key of a fixed port is 16 letters and digits' } else { Say '💡' warn 'The password of a meeting point is 16 letters and digits' }
         }
     }
     $k.service = "$service"
@@ -218,7 +239,7 @@ if ($Forward -or $Meet) {
     $to, $given = Menu
 }
 $p = Point $given
-if (-not $p -or -not $p.key -or $p.key.Length -ne 16) { Fail "-Meet <the line of the meeting point>, $Lines" }
+if (-not $p -or -not (Key-Ok $p.key)) { Fail "-Meet <the line of the meeting point>, $Lines" }
 $fixed = $p.fixed
 $isRdp = $to -match ":$RDP$"
 $toHost, $toPort = $to -split ':(?=\d+$)'

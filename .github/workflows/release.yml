@@ -47,6 +47,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # the lines of a server, as both scripts of the server take them: docs/lines.tsv, the same RemoteDesk and DeFreez test by
+      - name: the lines
+        run: sh .github/lines.sh
+
       - name: pack
         run: |
           sh pack.sh linux syn-mirror-linux.sh
