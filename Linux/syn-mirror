@@ -1,0 +1,750 @@
+#!/usr/bin/perl
+# SYN Mirror on this computer, from the console: what its page in LuCI is on a router. As root:
+#   sudo syn-mirror              what happens now: the lines for the servers, the connections, the ports given, the records, the
+#                                reports, the blocked addresses, the newest tries
+#   sudo syn-mirror lines        the lines to copy: for the servers, and for the meeting points whose address changes
+#   sudo syn-mirror help         every command
+# It reads and changes /etc/syn-mirror.conf - its comments and other lines kept - and loads the settings at once by `systemctl
+# reload syn-mirror`: the meetings going on go on, the ports given stay with their servers. What happens now it takes from the
+# kernel - the table syn_mirror of nftables, conntrack - and from what `give` writes into /run/syn-mirror. Only perl and its own
+# modules, those of perl-base of Debian too.
+
+use strict;
+use warnings;
+use utf8;
+use IO::Socket::INET;
+use IO::Select;
+use Socket qw(inet_aton pack_sockaddr_in);
+
+# :utf8, not :encoding - perl-base of Debian has no Encode
+binmode STDOUT, ':utf8';
+binmode STDERR, ':utf8';
+$| = 1;
+
+my $CONF = $ENV{SYN_MIRROR_CONF} || '/etc/syn-mirror.conf';
+my $STATE = '/run/syn-mirror';
+my $LOAD = qq(. $CONF && /usr/libexec/syn-mirror/rules load "\$PASSWORD" "\$FIRST" "\$LAST" "\$WAIT" "\$TRIES" "\$BLOCK" "\$GUARD" "\$SHORT" "\$GUESSES" "\$FIXED" "\$RECORDS" && kill -HUP \$(cat /run/syn-mirror.pid));
+
+# ── the window: plain in a log or a pipe ──
+
+my $colour = -t STDOUT && !$ENV{NO_COLOR};
+my %tone = (good => '1;32', news => '36', warn => '33', bad => '1;31', quiet => '90', key => '1;33', name => '1;37');
+sub paint { my ($text, $t) = @_; $colour ? "\e[$tone{$t}m$text\e[0m" : $text }
+sub note { my ($t, $text) = @_; print ' ', paint($text, $t), "\n" }
+sub title { print "\n ", paint($_[0], 'name'), "\n" }
+sub fail { print STDERR ' ', paint($_[0], 'bad'), "\n"; exit 1 }
+
+# a table: the head, the rows, what is said when there is none. The columns as wide as their widest cell
+sub table {
+    my ($head, $rows, $empty) = @_;
+    return print '   ', paint($empty, 'quiet'), "\n" unless @$rows;
+    my @w = map { length } @$head;
+    for my $r (@$rows) {
+        for my $i (0 .. $#$r) { my $l = length($r->[$i] // ''); $w[$i] = $l if $l > ($w[$i] // 0) }
+    }
+    my $row = sub { my ($r) = @_; ('   ' . join('  ', map { sprintf('%-*s', $w[$_], $r->[$_] // '') } 0 .. $#$r)) =~ s/\s+$//r };
+    print paint($row->($head), 'quiet'), "\n";
+    print $row->($_), "\n" for @$rows;
+}
+
+# seconds in words: "52 s", "9 min 58 s", "3 h 12 min"
+sub span {
+    my ($s) = @_;
+    return '-' unless defined $s;
+    $s = int $s;
+    return "$s s" if $s < 60;
+    return sprintf('%d min %d s', $s / 60, $s % 60) if $s < 3600;
+    return sprintf('%d h %d min', $s / 3600, ($s % 3600) / 60);
+}
+sub ago { defined $_[0] ? span($_[0]) . ' ago' : 'never' }
+
+# ── the settings: /etc/syn-mirror.conf, its lines as they are ──
+
+my (@text, %conf);
+# the values that are lists, quoted: spaces between their entries
+my %LIST = map { $_ => 1 } qw(FIXED RECORDS REPORTS);
+# what a value added to the file of an older install says above it
+my %ABOUT = (
+    FIXED => '# fixed ports: port:key[:name], spaces between - each opened by its key alone, the same port at each start',
+    RECORDS => '# the records this computer keeps of meeting points whose address changes: name:write key:read key[,read key...]',
+    REPORTS => '# where this computer writes its own address, its address changing: [port to knock at=]write key[/read key]@meeting point:port',
+    ADDRESS => '# a name or an address of this computer for the lines of the servers; empty: found',
+);
+
+sub load {
+    %conf = (FIRST => 40000, LAST => 49999);
+    @text = ();
+    open my $f, '<', $CONF or fail("$CONF: $! - SYN Mirror is not installed here: sudo sh syn-mirror-linux.sh");
+    while (my $l = <$f>) {
+        $l =~ s/\r?\n$//;
+        push @text, $l;
+        next unless $l =~ /^\s*([A-Z]+)=(.*?)\s*$/;
+        my ($k, $v) = ($1, $2);
+        $v = $1 if $v =~ /^"(.*)"$/ || $v =~ /^'(.*)'$/;
+        $conf{$k} = $v;
+    }
+    close $f;
+}
+
+# a value set in its line, or in a line added at the end
+sub set {
+    my ($k, $v) = @_;
+    my $line = $LIST{$k} ? qq($k="$v") : "$k=$v";
+    my $done;
+    for (@text) {
+        next unless /^\s*$k=/;
+        $_ = $line;
+        $done = 1;
+        last;
+    }
+    push @text, ($ABOUT{$k} // ()), $line unless $done;
+    $conf{$k} = $v;
+}
+
+# the file written anew beside, then put in place: for root alone, it has the password
+sub save {
+    my $new = "$CONF.new";
+    open my $f, '>', $new or fail("$new: $!");
+    chmod 0600, $new;
+    print $f "$_\n" for @text;
+    close $f or fail("$new: $!");
+    rename $new, $CONF or fail("$CONF: $!");
+}
+
+sub systemd { -d '/run/systemd/system' && grep { -x "$_/systemctl" } split /:/, ($ENV{PATH} // '') }
+
+# the settings saved and loaded: a reload, not a restart - the stop of a restart would take the rules away from the meetings
+sub apply {
+    save();
+    if (!systemd()) {
+        note('warn', 'Saved. No systemd here: load them with');
+        print "   $LOAD\n";
+    } elsif (system('systemctl', 'is-active', '--quiet', 'syn-mirror') == 0) {
+        system('systemctl', 'reload', 'syn-mirror') == 0
+            ? note('good', 'Saved and loaded: the meetings going on go on')
+            : note('bad', 'Saved, not loaded: systemctl reload syn-mirror failed - see systemctl status syn-mirror');
+    } elsif (system('systemctl', 'is-failed', '--quiet', 'syn-mirror') == 0) {
+        system('systemctl', 'restart', 'syn-mirror') == 0
+            ? note('good', 'Saved, and SYN Mirror started again')
+            : note('bad', 'Saved; SYN Mirror does not start - see systemctl status syn-mirror');
+    } else {
+        note('warn', 'Saved. SYN Mirror is not running: systemctl start syn-mirror');
+    }
+}
+
+# the entries of a list as they are written: those not understood stay as they are, and are told
+sub entries { split ' ', $conf{$_[0]} // '' }
+
+sub fixed {
+    map { /^(\d+):([A-Za-z0-9]{16})(?::([A-Za-z0-9_-]+))?$/ ? { raw => $_, port => $1, key => $2, name => $3 } : () } entries('FIXED');
+}
+sub records {
+    map { /^([A-Za-z0-9_-]+):([A-Za-z0-9]{16}):([A-Za-z0-9,]*)$/
+        ? { raw => $_, name => $1, write => $2, reads => [grep { /^[A-Za-z0-9]{16}$/ } split /,/, $3] } : () } entries('RECORDS');
+}
+sub reports {
+    map { /^(?:(\d+)=)?([A-Za-z0-9]{16})(?:\/([A-Za-z0-9]{16}))?@([^\s:@\/]+):(\d+)$/
+        ? { raw => $_, port => $1 // $conf{FIRST}, write => $2, read => $3, host => $4, at => $5 } : () } entries('REPORTS');
+}
+
+# the entries not understood, told once
+sub odd {
+    my %ok = map { $_->{raw} => 1 } fixed(), records(), reports();
+    for my $k (qw(FIXED RECORDS REPORTS)) {
+        note('warn', "$k in $CONF: not understood, left as it is: $_") for grep { !$ok{$_} } entries($k);
+    }
+}
+
+# the keys of this computer: each is one of a kind
+sub keys_used { ($conf{PASSWORD} // ()), (map { $_->{key} } fixed()), (map { ($_->{write}, @{$_->{reads}}) } records()) }
+
+sub random_bytes {
+    my ($n) = @_;
+    my $b = '';
+    if (open my $r, '<:raw', '/dev/urandom') { read $r, $b, $n; close $r }
+    $b = join '', map { chr int rand 256 } 1 .. $n if length $b != $n;
+    return $b;
+}
+
+# 16 letters and digits - the password and every key -, those that are not mistaken for one another when read aloud or typed; none used here, nor in `also`
+sub new_key {
+    my %used = map { $_ => 1 } keys_used(), @_;
+    my $abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    while (1) {
+        my $k = join '', map { substr($abc, ord($_) % length $abc, 1) } split //, random_bytes(16);
+        return $k unless $used{$k};
+    }
+}
+
+# ── what `give` writes: the records it keeps, the reports it sends ──
+
+sub state_lines {
+    my ($file) = @_;
+    open my $f, '<', "$STATE/$file" or return ();
+    my @l = map { [split ' '] } <$f>;
+    close $f;
+    return grep { @$_ } @l;
+}
+# name -> [ address, port, unix time of the last write ]
+sub kept_records { map { ($_->[0] => [@$_[1 .. 3]]) } state_lines('records') }
+# "host:port port" -> { sent, answered, seen }
+sub sent_reports { map { ("$_->[0] $_->[1]" => { sent => $_->[2], answered => $_->[3], seen => $_->[4] }) } state_lines('reports') }
+sub report_state { my ($r, $sent) = @_; $sent->{"$r->{host}:$r->{at} $r->{port}"} }
+
+# ── the address of this computer for the lines ──
+
+sub public {
+    my @b = split /\./, $_[0] // '';
+    return 0 unless @b == 4;
+    return !($b[0] == 0 || $b[0] == 10 || $b[0] == 127 || $b[0] >= 224 || ($b[0] == 169 && $b[1] == 254) || ($b[0] == 192 && $b[1] == 168)
+        || ($b[0] == 172 && $b[1] >= 16 && $b[1] <= 31) || ($b[0] == 100 && $b[1] >= 64 && $b[1] <= 127));
+}
+
+# The address the internet sees this computer at: one STUN Binding request ( RFC 5389 ) to each public server, from one socket;
+# the first answer is taken, undef when none answers in 2 seconds. As public.uc of the router
+sub stun {
+    my @servers = ('stun.miwifi.com:3478', 'stun.chat.bilibili.com:3478', 'stun.qq.com:3478', 'stun.l.google.com:19302',
+        'stun.cloudflare.com:3478', 'global.stun.twilio.com:3478', 'stun.nextcloud.com:3478', 'stun.sipgate.net:3478');
+    my $cookie = "\x21\x12\xa4\x42";
+    my $id = random_bytes(12);
+    my $udp = IO::Socket::INET->new(Proto => 'udp') or return;
+    my $sel = IO::Select->new($udp);
+    # the address of the answer to this request: XOR-MAPPED-ADDRESS, its bytes xor the cookie, or MAPPED-ADDRESS
+    my $address = sub {
+        my ($a) = @_;
+        return if length $a < 20 || substr($a, 0, 2) ne "\x01\x01" || substr($a, 4, 16) ne $cookie . $id;
+        my $plain;
+        for (my $at = 20; $at + 4 <= length $a;) {
+            my ($type, $size) = unpack 'nn', substr($a, $at, 4);
+            if (($type == 0x0020 || $type == 0x0001) && $size >= 8 && $at + 12 <= length $a && ord(substr($a, $at + 5, 1)) == 1) {
+                my @b = unpack 'C4', substr($a, $at + 8, 4);
+                if ($type == 0x0020) {
+                    my @c = unpack 'C4', $cookie;
+                    return join '.', map { $b[$_] ^ $c[$_] } 0 .. 3;
+                }
+                $plain = join '.', @b;
+            }
+            $at += 4 + (($size + 3) & ~3);
+        }
+        return $plain;
+    };
+    my $take = sub {
+        my ($wait) = @_;
+        while ($sel->can_read($wait)) {
+            my $answer = '';
+            recv($udp, $answer, 512, 0);
+            my $found = $address->($answer);
+            return $found if $found;
+            $wait = 0;
+        }
+        return;
+    };
+    # the names are looked up one by one: an answer that came meanwhile ends it at once
+    for (@servers) {
+        my ($host, $port) = split /:/;
+        my $ip = inet_aton($host);
+        send($udp, "\x00\x01\x00\x00" . $cookie . $id, 0, pack_sockaddr_in($port, $ip)) if $ip;
+        my $found = $take->(0);
+        return $found if $found;
+    }
+    my $until = time + 2;
+    while ((my $left = $until - time) > 0) {
+        my $found = $take->($left);
+        return $found if $found;
+    }
+    return;
+}
+
+# the address for the lines, and where it comes from: set; as a meeting point of fixed address saw it, at the last answer to the
+# report of this computer; of the default route, when public; as STUN finds it. Looked for once
+my @address;
+sub address {
+    return @address if @address;
+    return @address = ($conf{ADDRESS}, 'set by syn-mirror address') if ($conf{ADDRESS} // '') ne '';
+    my $sent = { sent_reports() };
+    my ($seen, $when, $by);
+    for my $r (reports()) {
+        my $s = report_state($r, $sent) or next;
+        next unless $s->{answered} && public($s->{seen}) && (!$when || $s->{answered} > $when);
+        ($seen, $when, $by) = ($s->{seen}, $s->{answered}, $r->{host});
+    }
+    return @address = ($seen, "as the meeting point $by saw it " . ago(time - $when)) if $seen;
+    my $udp = IO::Socket::INET->new(Proto => 'udp', PeerAddr => '1.1.1.1', PeerPort => 53);
+    my $local = $udp ? $udp->sockhost : undef;
+    return @address = ($local, 'of the default route') if public($local);
+    my $found = stun();
+    return @address = ($found, 'as the internet sees it: STUN') if $found;
+    return @address = (undef, 'not found');
+}
+
+# ── the lines ──
+
+# The line of a server for a port: `@` - the password, a port given at each start, the port the first; `=` - the key of a fixed
+# port, knocked at once. Read from the meeting points of fixed address when reports with a read key write this port there; direct
+# else, at the address of this computer. The keys as stars when `hide`
+sub server_line {
+    my ($sep, $secret, $port, $hide) = @_;
+    my $k = sub { $hide ? '*' x 16 : $_[0] };
+    my @reads = map { $k->($_->{read}) . "\@$_->{host}:$_->{at}" } grep { defined $_->{read} && $_->{port} == $port } reports();
+    return $k->($secret) . $sep . join(',', @reads) if @reads;
+    my ($a) = address();
+    return $k->($secret) . $sep . ($a // '<address>') . ":$port";
+}
+
+# a line that reads the address at the meeting points of fixed address: one more @ after the key
+sub read_form { $_[0] =~ /^.{16}[@=][^,]*@/ }
+
+# what each line is: [ the words, the line, the line of the client or undef ]
+sub server_lines {
+    my ($hide) = @_;
+    my @l;
+    if (($conf{PASSWORD} // '') =~ /^[A-Za-z0-9]{16}$/) {
+        my $line = server_line('@', $conf{PASSWORD}, $conf{FIRST}, $hide);
+        push @l, ['Ports given at each start', $line, undef];
+    }
+    for my $f (sort { $a->{port} <=> $b->{port} } fixed()) {
+        my $line = server_line('=', $f->{key}, $f->{port}, $hide);
+        my ($a) = address();
+        push @l, ["Fixed port $f->{port}" . ($f->{name} ? ", $f->{name}" : ''), $line, read_form($line) ? undef : ($a // '<address>') . ":$f->{port}"];
+    }
+    return @l;
+}
+
+# the line a meeting point of a changing address writes by: <write key>/<read key>@<this computer>:<first>
+sub record_line {
+    my ($r, $read) = @_;
+    my ($a) = address();
+    return "$r->{write}/" . ($read // $r->{reads}[0] // '') . '@' . ($a // '<address>') . ":$conf{FIRST}";
+}
+
+# the password, when it is not of 16 characters: servers get nothing with it, said plainly
+sub password_note {
+    my $p = $conf{PASSWORD} // '';
+    return if $p =~ /^[A-Za-z0-9]{16}$/;
+    note('bad', $p eq '' ? 'No password: servers get no port. Make one: syn-mirror password new'
+        : 'The password is not of 16 letters and digits, as SYN Mirror takes it now: servers get no port with it. A new one: syn-mirror password new');
+}
+
+sub address_note {
+    my ($a, $from) = address();
+    if (defined $a) {
+        note('quiet', "This computer: $a, $from. Another: syn-mirror address <name or address>");
+        # the address of a computer that writes it to a meeting point changes: a direct line dies with it
+        note('warn', 'It changes: a line with it stops working then. A report for that port makes the line read the address instead')
+            if $from =~ /saw it/;
+    }
+    else { note('warn', 'The public address of this computer is not found: set it - syn-mirror address <name or address>') }
+}
+
+# ── the kernel: the table syn_mirror, conntrack ──
+
+sub secs {
+    my ($t) = @_;
+    my $all = 0;
+    my %unit = (d => 86400, h => 3600, m => 60, s => 1);
+    while ($t =~ s/^(\d+)(ms|d|h|m|s)//) { $all += $1 * $unit{$2} unless $2 eq 'ms' }
+    return $all;
+}
+
+# the elements of each set, as nft lists them: name -> [ { key => [ its parts ], left => seconds or undef } ]
+sub sets {
+    my ($table) = @_;
+    my (%sets, $name, $on, $all);
+    $name = '';
+    for my $l (split /\n/, $table) {
+        $name = $1 eq 'set' ? $2 : '' if $l =~ /^\s*(set|map|chain)\s+(\S+)/;
+        if ($l =~ s/.*elements = \{//) { $on = 1; $all = '' }
+        next unless $on;
+        $all .= " $l";
+        next if index($l, '}') < 0;
+        $on = 0;
+        $all =~ s/\}.*//s;
+        next unless $name;
+        for my $it (split /,/, $all) {
+            my @w = split ' ', $it;
+            my (@key, $left);
+            for (my $i = 0; $i < @w; $i++) {
+                if ($w[$i] eq 'expires') { $left = secs($w[$i + 1] // ''); last }
+                if ($w[$i] eq 'timeout') { $i++; next }
+                push @key, $w[$i] unless $w[$i] eq '.' || $w[$i] eq ':';
+            }
+            push @{$sets{$name}}, { key => \@key, left => $left } if @key;
+        }
+    }
+    return \%sets;
+}
+
+# the connections of the mark of SYN Mirror: the original direction is the client to the meeting point, the reply comes from
+# the server
+sub meetings {
+    open my $f, '<', '/proc/net/nf_conntrack' or return ();
+    my @m;
+    while (<$f>) {
+        next unless / tcp / && /mark=(\d+)/ && ($1 & 0x08000000);
+        my @w = split;
+        my (@src, @sport, @dport, $bytes);
+        for (@w) {
+            my ($k, $v) = split /=/, $_, 2;
+            next unless defined $v;
+            push @src, $v if $k eq 'src';
+            push @sport, $v if $k eq 'sport';
+            push @dport, $v if $k eq 'dport';
+            $bytes += $v if $k eq 'bytes';
+        }
+        push @m, [$dport[0], "$src[0]:$sport[0]", "$src[1]:$sport[1]", $w[5], bytes_text($bytes)];
+    }
+    close $f;
+    return @m;
+}
+
+sub bytes_text {
+    my ($n) = @_;
+    return '-' unless defined $n;
+    my @u = ('B', 'KB', 'MB', 'GB', 'TB');
+    my $i = 0;
+    while ($n >= 1024 && $i < $#u) { $n /= 1024; $i++ }
+    return ($i ? sprintf('%.1f', $n) : $n) . " $u[$i]";
+}
+
+sub giving {
+    for (glob '/proc/[0-9]*/cmdline') {
+        open my $f, '<', $_ or next;
+        local $/;
+        my $c = <$f> // '';
+        return 1 if $c =~ m{syn-mirror/give\.pl};
+    }
+    return 0;
+}
+
+# what a try of the last 10 minutes was, in words
+my %TRIED = (
+    request => 'Asked for a port',
+    knock => 'Knocked or held, as the one the port is given to',
+    stranger => 'Knocked, but not as the one the port is given to',
+    wrong => 'Wrong password or key',
+    blocked => 'Ignored: the address is blocked',
+    guessing => 'Dialed, ignored: it guessed passwords at this port',
+    'dial-a' => 'Dialed: the server of this port',
+    dial => 'Dialed',
+    wrote => 'Wrote its address: a meeting point of a changing address',
+    read => 'Read an address',
+);
+
+# ── the commands ──
+
+sub status {
+    title('For the servers');
+    password_note();
+    my @l = server_lines(1);
+    table(['What', 'Line', 'The client'], [map { [$_->[0], $_->[1], $_->[2] // 'the server shows its line'] } @l],
+        'No line: no password of 16 characters, no fixed port');
+    address_note() if grep { !read_form($_->[1]) } @l;
+    note('quiet', 'The keys are hidden: syn-mirror lines shows them, to copy');
+
+    my $table = `nft list table ip syn_mirror 2>/dev/null`;
+    if ($? != 0) {
+        print "\n";
+        note('bad', 'SYN Mirror is not running: the table of its rules is not in the kernel');
+        note('warn', systemd() ? 'To start it: systemctl start syn-mirror; why not: systemctl status syn-mirror' : "To start it: $LOAD");
+        return;
+    }
+    my $s = sets($table);
+    my $set = sub { @{$s->{$_[0]} // []} };
+    print "\n";
+    note('bad', 'give does not run: servers get no ports, the records are neither written nor read. systemctl restart syn-mirror') unless giving();
+
+    my %name = map { $_->{port} => $_->{name} // 'fixed' } fixed();
+    my %owner = map { $_->{key}[0] => $_->{key}[1] } $set->('holder');
+    my %holds = map { ("$_->{key}[0] $_->{key}[1]" => 1) } $set->('holder');
+    my %open = map { $_->{key}[0] => 1 } $set->('open');
+    my %dials;
+    for ($set->('seen')) { $dials{$_->{key}[0]} //= "$_->{key}[1]:$_->{key}[2]" }
+
+    title('Connections');
+    table(['Port', 'Client (connected)', 'Server (waited)', 'State', 'Data'], [meetings()], 'No connections now');
+
+    title('Ports given to servers');
+    my @ports = map {
+        my $p = $_->{key}[0];
+        my $now = !$open{$p} ? 'closed, kept for the server' : $dials{$p} ? "open, the server dials from $dials{$p}" : 'open, the server does not dial yet';
+        [$p . ($name{$p} ? " $name{$p}" : ''), $owner{$p} // '-', $now, span($_->{left})];
+    } sort { $a->{key}[0] <=> $b->{key}[0] } $set->('given');
+    table(['Port', 'The server', 'Now', 'Free in, unless it knocks'], \@ports, 'No port is given');
+
+    my %kept = kept_records();
+    if (my @r = records()) {
+        title('Records: the addresses of meeting points that change');
+        table(['Name', 'Address', 'Port to knock at', 'Written'],
+            [map { my $k = $kept{$_->{name}}; [$_->{name}, $k ? $k->[0] : 'none yet', $k ? $k->[1] : '-', $k ? ago(time - $k->[2]) : '-'] } @r], '');
+    }
+    my $sent = { sent_reports() };
+    if (my @r = reports()) {
+        title('Reports: where this computer writes its address');
+        my $n = 0;
+        table(['#', 'Meeting point', 'Port to knock at', 'Last answer', 'It saw this computer at'],
+            [map { my $st = report_state($_, $sent); $n++;
+                [$n, "$_->{host}:$_->{at}", $_->{port}, $st && $st->{answered} ? ago(time - $st->{answered}) : $st ? 'none yet' : 'not sent yet', $st && $st->{seen} ne '-' ? $st->{seen} : '-'] } @r], '');
+    }
+
+    title('Blocked addresses');
+    table(['Address', 'Where, why', 'Blocked for'],
+        [(map { [$_->{key}[0], 'all: wrong passwords or keys', span($_->{left})] } $set->('blocked')),
+         (map { [$_->{key}[0], "port $_->{key}[1]: guessed passwords", span($_->{left})] } $set->('guessing'))], 'No address is blocked');
+
+    my %blocked = map { $_->{key}[0] => 1 } $set->('blocked');
+    my %guessing = map { ("$_->{key}[0] $_->{key}[1]" => 1) } $set->('guessing');
+    my @tries;
+    for my $kind (qw(t_asked t_knocked t_refused t_dialed t_wrote t_read)) {
+        for ($set->($kind)) {
+            my ($addr, $sport, $port) = @{$_->{key}};
+            my $what = $kind eq 't_asked' ? 'request' : $kind eq 't_wrote' ? 'wrote' : $kind eq 't_read' ? 'read'
+                : $kind eq 't_knocked' ? ($holds{"$port $addr"} ? 'knock' : 'stranger')
+                : $kind eq 't_refused' ? ($blocked{$addr} ? 'blocked' : 'wrong')
+                : $holds{"$port $addr"} ? 'dial-a' : $guessing{"$addr $port"} ? 'guessing' : 'dial';
+            push @tries, [600 - ($_->{left} // 600), "$addr:$sport", $port, $TRIED{$what}];
+        }
+    }
+    @tries = sort { $a->[0] <=> $b->[0] } @tries;
+    title('Tries, the last 10 minutes' . (@tries > 30 ? ': the newest 30 of ' . @tries : ''));
+    table(['When', 'From', 'Port', 'What'], [map { [ago($_->[0]), @$_[1 .. 3]] } grep { defined } @tries[0 .. (@tries > 30 ? 29 : $#tries)]],
+        'Nothing came');
+    odd();
+}
+
+sub lines {
+    my @l = server_lines(0);
+    title('For the servers');
+    password_note();
+    for (@l) {
+        my ($what, $line, $client) = @$_;
+        my $how = read_form($line) ? 'the address of this computer changes: the server reads it at the meeting points of fixed address'
+            : $client ? "the client connects to $client" : 'the server shows the line of the client';
+        print '   ', paint($what, 'news'), paint(": $how", 'quiet'), "\n     ", paint($line, 'good'), "\n";
+    }
+    address_note() if grep { !read_form($_->[1]) } @l;
+    if (my @r = records()) {
+        title('For the meeting points whose address changes: each pastes its line into syn-mirror report add, or Reports of its page');
+        print '   ', paint($_->{name}, 'news'), "\n     ", paint(record_line($_), 'good'), "\n" for @r;
+    }
+    odd();
+}
+
+sub password {
+    my ($what) = @_;
+    if (!defined $what) {
+        print ' ', paint($conf{PASSWORD} // '', 'good'), "\n";
+        return;
+    }
+    fail('syn-mirror password [new]') unless $what eq 'new';
+    my $p = new_key();
+    set('PASSWORD', $p);
+    apply();
+    print ' The new password: ', paint($p, 'good'), "\n";
+    note('warn', "Give it to every server at once: one that asks and knocks with the old one blocks its own address after $conf{TRIES} tries") if $conf{TRIES};
+    lines();
+}
+
+sub fixed_cmd {
+    my ($what, $port, $name) = @_;
+    if (!defined $what) {
+        title('Fixed ports: each opened by its key alone, the same port at each start of the server');
+        table(['Port', 'Name', 'The line of its server'], [map { [$_->{port}, $_->{name} // '-', server_line('=', $_->{key}, $_->{port}, 0)] }
+            sort { $a->{port} <=> $b->{port} } fixed()], 'None: syn-mirror fixed add <port> [<name>]');
+        odd();
+        return;
+    }
+    if ($what eq 'add') {
+        fail("syn-mirror fixed add <port> [<name>]: a port of $conf{FIRST}+1 - $conf{LAST}") unless defined $port && $port =~ /^\d+$/;
+        fail("The port $port is not of the range: $conf{FIRST} answers requests, the ports of meeting are " . ($conf{FIRST} + 1) . "-$conf{LAST}")
+            unless $port > $conf{FIRST} && $port <= $conf{LAST};
+        fail("The port $port is fixed already: syn-mirror fixed") if grep { $_->{port} == $port } fixed();
+        fail('A name is letters, digits, - and _') if defined $name && $name !~ /^[A-Za-z0-9_-]+$/;
+        my $key = new_key();
+        set('FIXED', join ' ', entries('FIXED'), "$port:$key" . (defined $name ? ":$name" : ''));
+        apply();
+        my ($a) = address();
+        my $line = server_line('=', $key, $port, 0);
+        title("Fixed port $port" . (defined $name ? ", $name" : ''));
+        print '   ', paint('The line of its server', 'news'), "\n     ", paint($line, 'good'), "\n";
+        if (read_form($line)) { note('quiet', 'The address of this computer changes: the server reads it, and shows the line of the client') }
+        else {
+            print '   ', paint('The client connects to', 'news'), "\n     ", paint(($a // '<address>') . ":$port", 'good'), "\n";
+            address_note();
+        }
+        note('quiet', 'The port is of its server alone: no other gets it. It is open while the server knocks');
+        return;
+    }
+    if ($what eq 'del') {
+        fail('syn-mirror fixed del <port>') unless defined $port && $port =~ /^\d+$/;
+        my @all = entries('FIXED');
+        my @keep = grep { !/^$port:/ } @all;
+        fail("No fixed port $port: syn-mirror fixed") if @keep == @all;
+        set('FIXED', join ' ', @keep);
+        apply();
+        note('good', "The port $port is fixed no more: its key opens nothing");
+        return;
+    }
+    fail('syn-mirror fixed [add <port> [<name>] | del <port>]');
+}
+
+sub record_cmd {
+    my ($what, $name) = @_;
+    my %kept = kept_records();
+    if (!defined $what) {
+        title('Records: the addresses of meeting points that change, kept here and read by their servers');
+        table(['Name', 'Address', 'Port to knock at', 'Written', 'Read keys'],
+            [map { my $k = $kept{$_->{name}};
+                [$_->{name}, $k ? $k->[0] : 'none yet', $k ? $k->[1] : '-', $k ? ago(time - $k->[2]) : '-', scalar @{$_->{reads}}] } records()],
+            'None: syn-mirror record add <name>');
+        for (records()) {
+            print '   ', paint("$_->{name}: the line of its meeting point", 'news'), "\n     ", paint(record_line($_), 'good'), "\n";
+            print '   ', paint('its read keys', 'quiet'), ' ', join(' ', @{$_->{reads}}), "\n" if @{$_->{reads}} > 1;
+        }
+        address_note() if records();
+        odd();
+        return;
+    }
+    fail("syn-mirror record $what <name>") unless defined $name;
+    my ($r) = grep { $_->{name} eq $name } records();
+    if ($what eq 'add') {
+        fail('A name is letters, digits, - and _') unless $name =~ /^[A-Za-z0-9_-]+$/;
+        fail("The record $name is there already: syn-mirror record") if $r;
+        my $write = new_key();
+        my $read = new_key($write);
+        set('RECORDS', join ' ', entries('RECORDS'), "$name:$write:$read");
+        apply();
+        title("The record $name");
+        print '   ', paint('The line of the meeting point whose address changes: its syn-mirror report add, or Reports of its page', 'news'),
+            "\n     ", paint(record_line({ write => $write, reads => [$read] }), 'good'), "\n";
+        address_note();
+        return;
+    }
+    fail("No record $name: syn-mirror record") unless $r;
+    if ($what eq 'del') {
+        set('RECORDS', join ' ', grep { $_ ne $r->{raw} } entries('RECORDS'));
+        apply();
+        note('good', "The record $name is erased: its keys write and read nothing");
+        return;
+    }
+    if ($what eq 'read') {
+        my $read = new_key();
+        set('RECORDS', join ' ', map { $_ eq $r->{raw} ? "$r->{name}:$r->{write}:" . join(',', @{$r->{reads}}, $read) : $_ } entries('RECORDS'));
+        apply();
+        print ' One more read key of the record ', paint($name, 'name'), ': ', paint($read, 'good'), "\n";
+        note('quiet', 'In the line of a server it stands after the first @ or =, before the address of this computer; syn-mirror record del takes them all away');
+        print '   ', paint('Or the line of the meeting point with it, for its page to make the lines of the servers', 'news'),
+            "\n     ", paint(record_line($r, $read), 'good'), "\n";
+        return;
+    }
+    fail('syn-mirror record [add <name> | del <name> | read <name>]');
+}
+
+sub report_cmd {
+    my ($what, $arg, $port) = @_;
+    if (!defined $what) {
+        my $sent = { sent_reports() };
+        my $n = 0;
+        title('Reports: where this computer writes its address, every 20 s and at once when it changes');
+        table(['#', 'Meeting point', 'Port to knock at', 'Read key', 'Last answer', 'It saw this computer at'],
+            [map { my $st = report_state($_, $sent); $n++;
+                [$n, "$_->{host}:$_->{at}", $_->{port}, defined $_->{read} ? 'yes' : 'no: the lines are direct', $st && $st->{answered} ? ago(time - $st->{answered}) : $st ? 'none yet' : 'not sent yet',
+                 $st && $st->{seen} ne '-' ? $st->{seen} : '-'] } reports()],
+            'None: syn-mirror report add <the line the meeting point of fixed address gives> [<port to knock at>]');
+        odd();
+        return;
+    }
+    if ($what eq 'add') {
+        fail('syn-mirror report add <write key>[/<read key>]@<meeting point>:<port> [<port to knock at>]: the line its owner gives')
+            unless defined $arg && $arg =~ m{^[A-Za-z0-9]{16}(/[A-Za-z0-9]{16})?@[^\s:@/]+:\d+$};
+        $port //= $conf{FIRST};
+        fail("The port to knock at: $conf{FIRST}, or a fixed port of $conf{FIRST}+1 - $conf{LAST}")
+            unless $port =~ /^\d+$/ && $port >= $conf{FIRST} && $port <= $conf{LAST};
+        my $raw = ($port == $conf{FIRST} ? '' : "$port=") . $arg;
+        my ($w, $host, $at) = $arg =~ m{^([A-Za-z0-9]{16}).*@([^:]+):(\d+)$};
+        fail('This report is there already: syn-mirror report')
+            if grep { $_->{write} eq $w && $_->{host} eq $host && $_->{at} == $at && $_->{port} == $port } reports();
+        note('warn', "No fixed port $port here: add it - syn-mirror fixed add $port - or the servers knock at nothing")
+            if $port != $conf{FIRST} && !grep { $_->{port} == $port } fixed();
+        set('REPORTS', join ' ', entries('REPORTS'), $raw);
+        apply();
+        note('good', "This computer writes its address to $host:$at every 20 s, and at once when it changes");
+        if ($arg =~ m{/}) { lines() }
+        else { note('warn', 'The line has no read key: the lines of the servers stay direct. Ask the owner of the meeting point for the line with it') }
+        return;
+    }
+    if ($what eq 'del') {
+        my @r = reports();
+        fail('syn-mirror report del <number>: the # of syn-mirror report') unless defined $arg && $arg =~ /^\d+$/ && $arg >= 1 && $arg <= @r;
+        my $gone = $r[$arg - 1];
+        set('REPORTS', join ' ', grep { $_ ne $gone->{raw} } entries('REPORTS'));
+        apply();
+        note('good', "This computer writes its address to $gone->{host}:$gone->{at} no more");
+        return;
+    }
+    fail('syn-mirror report [add <line> [<port>] | del <number>]');
+}
+
+sub address_cmd {
+    my ($to) = @_;
+    if (!defined $to) {
+        my ($a, $from) = address();
+        defined $a ? print(' ', paint($a, 'good'), paint(" $from", 'quiet'), "\n") : note('warn', 'Not found: syn-mirror address <name or address>');
+        return;
+    }
+    if ($to eq 'auto') { set('ADDRESS', '') }
+    else {
+        fail('A name in DNS or an IPv4 address, such as router.example.org or 203.0.113.7') unless $to =~ /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
+        set('ADDRESS', $to);
+    }
+    # the lines only take it: nothing to load
+    save();
+    @address = ();
+    address_cmd();
+}
+
+sub help {
+    print <<"END";
+
+ SYN Mirror on this computer. As root: sudo syn-mirror <command>
+
+   syn-mirror                              what happens now
+   syn-mirror lines                        the lines to copy: for the servers, and for the meeting points whose address changes
+
+   syn-mirror password                     the password: the server asks for a port with it, a new one at each start
+   syn-mirror password new                 a new one: give it to every server at once
+
+   syn-mirror fixed                        the fixed ports: each opened by its key alone, the same port at each start
+   syn-mirror fixed add <port> [<name>]    a fixed port, of the range, with a new key: prints the line of its server
+   syn-mirror fixed del <port>
+
+   This computer keeps the address of a meeting point whose address changes, its own fixed:
+   syn-mirror record                       the records, with the address written last
+   syn-mirror record add <name>            a record with a new write key and read key: prints the line for that meeting point
+   syn-mirror record read <name>           one more read key of it
+   syn-mirror record del <name>
+
+   The address of this computer changes; a meeting point of fixed address keeps it:
+   syn-mirror report                       where it writes its address, and the last answer
+   syn-mirror report add <line> [<port>]   the line the owner of that meeting point gives; the port to knock at: the first port
+                                           of this computer - the servers ask it for a port - or a fixed port
+   syn-mirror report del <number>
+
+   syn-mirror address [<name> | auto]      the address of this computer in the lines; auto: found
+
+ The settings are $CONF; a command that changes them loads them at once.
+END
+}
+
+my $cmd = shift(@ARGV) // 'status';
+if ($cmd =~ /^(help|-h|--help)$/) { help(); exit 0 }
+fail('As root: sudo syn-mirror ' . join(' ', $cmd, @ARGV)) if $> != 0;
+load();
+if ($cmd eq 'status') { status() }
+elsif ($cmd eq 'lines') { lines() }
+elsif ($cmd eq 'password') { password(@ARGV) }
+elsif ($cmd eq 'fixed') { fixed_cmd(@ARGV) }
+elsif ($cmd eq 'record') { record_cmd(@ARGV) }
+elsif ($cmd eq 'report') { report_cmd(@ARGV) }
+elsif ($cmd eq 'address') { address_cmd(@ARGV) }
+else { help(); exit 2 }
+print "\n";

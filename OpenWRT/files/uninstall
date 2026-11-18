@@ -16,7 +16,7 @@ elif command -v opkg >/dev/null; then
 fi
 
 # every file, whichever way it came
-rm -rf /usr/libexec/syn-mirror /usr/share/syn-mirror
+rm -rf /usr/libexec/syn-mirror /usr/share/syn-mirror /tmp/syn-mirror
 rm -f /etc/init.d/syn-mirror /etc/rc.d/*syn-mirror /etc/config/syn-mirror \
 	/usr/share/nftables.d/chain-pre/forward/30-syn-mirror.nft \
 	/www/luci-static/resources/view/syn-mirror.js /usr/share/luci/menu.d/luci-app-syn-mirror.json \

@@ -1,14 +1,14 @@
 # SYN Mirror: the meeting of two TCP connections in the NAT of the router.
 #
-# A side asks for a port of meeting first: the password and its id - 8 random bytes of its own - to the first port of the range,
-# the port of requests. The program `give` answers there with a port nobody holds, 2 bytes, and gives it to that id: only knocks
-# with it open the port. Not to an address: a NAT that gives the side another address, or another port for each try, keeps the
-# port its own. These rules let only the right password reach `give`, a few a second from an address.
+# A side asks for a port of meeting first: the password, 16 characters, and its id - 8 random bytes of its own - to the first port
+# of the range, the port of requests. The program `give` answers there with a port nobody holds, 2 bytes, and gives it to that id:
+# only knocks with it open the port. Not to an address: a NAT that gives the side another address, or another port for each try,
+# keeps the port its own. These rules let only the right password reach `give`, a few a second from an address.
 #
-# The side opens its port of meeting by knocking: one UDP packet to that port, the password and the id - 16 bytes - its whole
+# The side opens its port of meeting by knocking: one UDP packet to that port, the password and the id - 24 bytes - its whole
 # payload. The first SYN that comes to an open port is dropped without a word and remembered; its side keeps knocking and trying -
 # every second or two, from one source port, so its NAT keeps the same mapping - and so keeps the port open: it closes `wait`
-# seconds after the side gives up. A knock of 17 bytes, the password, the id and one byte more, holds the port without opening it:
+# seconds after the side gives up. A knock of 25 bytes, the password, the id and one byte more, holds the port without opening it:
 # the side that shows its port to a person and waits for a yes. The first SYN from another address is sent to the first side as if from the router
 # itself, from the address that side dials: the two SYNs meet - TCP simultaneous open - and conntrack carries the rest as one
 # connection, in the kernel. The port is closed then; it stays given while its side knocks. The meetings are these rules: `give`
@@ -23,15 +23,24 @@
 # is stopped, one who mistyped twice is not. The lines that end in `# guard` are the guard: the rules leave them out when it is
 # off, for a server whose meetings are short by nature.
 #
+# A fixed port: a port of the range set aside for one key of 16 characters, never given at random. Its side asks nothing: the key
+# alone - 16 bytes - knocks at that port and opens it, the key and one byte more hold it; the rest is as for any port of meeting.
+#
+# Records: a meeting point of a changing address ( D ) writes it here: the key of a record and the port its sides knock at, 18
+# bytes, to the port of requests - `give` keeps the address the write came from, and answers it. A read key, 16 bytes, to the same
+# port, reads it: `give` answers the address, the port and how old the record is. Both are as a request: only a right key reaches
+# `give`, a few a second from an address; a wrong one counts as a wrong password.
+#
 # /usr/libexec/syn-mirror/rules loads this file with the settings: $password ( hex ), $ports ( a range ) and $asks ( its first
-# port ) as variables of nft, @WAIT@, @BLOCK@, @TRIES@, @SHORT@ and @GUESSES@ put in the text ( nft takes no variable there ).
+# port ) as variables of nft, @WAIT@, @BLOCK@, @TRIES@, @SHORT@ and @GUESSES@ put in the text ( nft takes no variable there ); then
+# the fixed ports and the keys of the records into their sets.
 
 table ip syn_mirror {
     # the ports given, each until its side stops knocking: `give` adds a port here only when it is not here - in the kernel, at
     # once - so no two sides get one port
     set given   { type inet_service; flags dynamic, timeout; timeout @WAIT@; }
-    # each port given, with the id it was given to: the 8 bytes after the password
-    set owned   { typeof udp dport . @ih,64,64; flags dynamic, timeout; timeout @WAIT@; }
+    # each port given, with the id it was given to: the 8 bytes after the password, of 16
+    set owned   { typeof udp dport . @ih,128,64; flags dynamic, timeout; timeout @WAIT@; }
     # each port given, with the addresses that knocked at it with its id: for the page only. A NAT that gives the side another
     # address adds one more
     set holder  { typeof udp dport . ip saddr; flags dynamic, timeout; timeout @WAIT@; }
@@ -60,6 +69,11 @@ table ip syn_mirror {
     map first  { typeof tcp dport : ip saddr . tcp sport; flags dynamic, timeout; timeout 15s; }
     # the address of the router the first side dials, and the port: what it sees the second side come from
     map back    { typeof tcp dport : ip daddr . tcp dport; flags dynamic, timeout; timeout 15s; }
+    # the fixed ports, each with its key: of the settings
+    set fixed   { typeof udp dport . @ih,0,128; }
+    # the keys that write a record, and those that read one: of the settings, each with the port of requests
+    set writers { typeof udp dport . @ih,0,128; }
+    set readers { typeof udp dport . @ih,0,128; }
 
     # what came in the last 10 minutes, for the page: who - address and source port - to which port of the range. Each kind apart:
     # a flood of wrong passwords fills its own set, not those of the computers that work
@@ -71,6 +85,9 @@ table ip syn_mirror {
     set t_refused { typeof ip saddr . udp sport . udp dport; size 256; flags dynamic, timeout; timeout 10m; }
     # the SYNs to the ports given, open or closed
     set t_dialed  { typeof ip saddr . tcp sport . tcp dport; size 256; flags dynamic, timeout; timeout 10m; }
+    # the writes of a record, and the reads
+    set t_wrote   { typeof ip saddr . udp sport . udp dport; size 256; flags dynamic, timeout; timeout 10m; }
+    set t_read    { typeof ip saddr . udp sport . udp dport; size 256; flags dynamic, timeout; timeout 10m; }
 
     # every packet the router gets passes here: what is no new connection - nearly all of them, the replies to the router and to its
     # LAN among them - goes on after one test. A knock or a SYN dropped here is never confirmed by conntrack: the next is new again
@@ -88,10 +105,14 @@ table ip syn_mirror {
         udp dport != $ports return
         fib daddr type != local return
         ip saddr @blocked update @t_refused { ip saddr . udp sport . udp dport } drop
-        udp length 24 @ih,0,64 $password goto right
-        udp length 25 @ih,0,64 $password goto hold
-        # the password alone, as SYN Mirror took it before the ids: a side not updated yet gets nothing, and is not blocked for it
-        udp length 16 @ih,0,64 $password drop
+        udp length 32 @ih,0,128 $password goto right
+        udp length 33 @ih,0,128 $password goto hold
+        # the key of a fixed port, at that port: alone it knocks, with one byte more it holds
+        udp length 24 udp dport . @ih,0,128 @fixed goto fixed
+        udp length 25 udp dport . @ih,0,128 @fixed goto fixed_hold
+        # a write of a record, its key and a port; a read, its key alone
+        udp length 26 udp dport . @ih,0,128 @writers goto record
+        udp length 24 udp dport . @ih,0,128 @readers goto record
         # a wrong one: past the tries, its address is blocked
         update @t_refused { ip saddr . udp sport . udp dport } update @wrong { ip saddr limit rate over 1/minute burst @TRIES@ packets } add @blocked { ip saddr }
         drop
@@ -110,15 +131,32 @@ table ip syn_mirror {
         update @t_knocked { ip saddr . udp sport . udp dport }
         # a knock with the id the port was given to: the port is opened, or its time renewed - from whatever address. Others open
         # nothing
-        udp dport . @ih,64,64 @owned update @owned { udp dport . @ih,64,64 } update @holder { udp dport . ip saddr } update @given { udp dport } update @open { udp dport } drop
+        udp dport . @ih,128,64 @owned update @owned { udp dport . @ih,128,64 } update @holder { udp dport . ip saddr } update @given { udp dport } update @open { udp dport } drop
         drop
     }
 
     # the password, the id and one byte more: the port is held by its id, not opened
     chain hold {
         update @t_knocked { ip saddr . udp sport . udp dport }
-        udp dport . @ih,64,64 @owned update @owned { udp dport . @ih,64,64 } update @holder { udp dport . ip saddr } update @given { udp dport } drop
+        udp dport . @ih,128,64 @owned update @owned { udp dport . @ih,128,64 } update @holder { udp dport . ip saddr } update @given { udp dport } drop
         drop
+    }
+
+    # the key of a fixed port: the port is opened, or its time renewed - from whatever address
+    chain fixed {
+        update @t_knocked { ip saddr . udp sport . udp dport } update @holder { udp dport . ip saddr } update @given { udp dport } update @open { udp dport } drop
+    }
+
+    # the key of a fixed port and one byte more: the port is held, not opened
+    chain fixed_hold {
+        update @t_knocked { ip saddr . udp sport . udp dport } update @holder { udp dport . ip saddr } update @given { udp dport } drop
+    }
+
+    # a write or a read of a record: to `give`, unless its address asks too often - the same count as the requests for a port
+    chain record {
+        update @asking { ip saddr limit rate over 3/second burst 5 packets } drop
+        udp length 26 update @t_wrote { ip saddr . udp sport . udp dport } accept
+        update @t_read { ip saddr . udp sport . udp dport } accept
     }
 
     # a SYN to an open port of meeting of the router itself

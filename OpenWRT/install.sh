@@ -5,8 +5,8 @@
 # ( ../pack.sh makes it ):
 #   sh syn-mirror-openwrt.sh
 # The modules of ucode `give` needs come from the packages of OpenWrt when they are not there: ucode-mod-socket, 60 KiB, the
-# sockets; ucode-mod-math, which snapshots of OpenWrt do not have. nftables, fw4 and ucode are there already. A password of 8 characters is made when
-# /etc/config/syn-mirror has none, and printed. A router with LuCI gets the page Services > SYN Mirror too, with the button
+# sockets; ucode-mod-math, which snapshots of OpenWrt do not have. nftables, fw4 and ucode are there already. A password of 16
+# characters is made when /etc/config/syn-mirror has none, or one of 8 of SYN Mirror before, and printed. A router with LuCI gets the page Services > SYN Mirror too, with the button
 # Uninstall. `sh install.sh remove` does the same: every file installed is erased, the settings too. Installing again over an
 # installed SYN Mirror updates it and keeps its settings. The folder, or the file, copied into /tmp, is erased at the end: the files
 # are in their places, and the flash keeps them once.
@@ -62,11 +62,14 @@ put files/syn-mirror.nft /usr/share/syn-mirror/syn-mirror.nft
 put files/syn-mirror.init /etc/init.d/syn-mirror 755
 [ -f /etc/config/syn-mirror ] || put files/syn-mirror.config /etc/config/syn-mirror
 
-if [ -z "$(uci -q get syn-mirror.main.password)" ]; then
-	password=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 8)
+# none yet, or one of 8 characters, of SYN Mirror before: a new one of 16. A server with the old one gets nothing any more
+old=$(uci -q get syn-mirror.main.password)
+if [ "${#old}" -ne 16 ]; then
+	password=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
 	uci set syn-mirror.main.password="$password"
 	uci commit syn-mirror
 	echo "the password of this router: $password"
+	[ -z "$old" ] || echo "it was $old: a password is 16 characters now - give the new one to every server, and update them"
 fi
 
 if [ -d /www/luci-static/resources ]; then

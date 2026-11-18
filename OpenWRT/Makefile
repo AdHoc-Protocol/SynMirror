@@ -21,8 +21,9 @@ endef
 define Package/syn-mirror/description
   Two sides, each behind its NAT, dial the same port of the router; the router sends the SYN of one to the other as if from
   itself - TCP simultaneous open - and carries their connection in the kernel, as a forwarded port. A side asks the router for a
-  free port of meeting with a password of 8 bytes, and opens it by a knock: one UDP packet with the password. Rules of nftables,
-  and a script of ucode that hands out the ports.
+  free port of meeting with a password of 16 characters, and opens it by a knock: one UDP packet with the password; or knocks at a
+  fixed port with its key. A router whose address changes writes it into a record of another, which the sides read. Rules of
+  nftables, and a script of ucode that hands out the ports and keeps the records.
 endef
 
 define Package/syn-mirror/conffiles

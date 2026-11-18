@@ -1,9 +1,11 @@
 #!/bin/sh
 # The rules of SYN Mirror in the kernel: `rules load <password> <first port> <last port> <wait seconds> <tries> <block seconds>
-# <guard 1|0> <short seconds> <guesses>` loads the table
+# <guard 1|0> <short seconds> <guesses> [<fixed ports> [<records>]]` loads the table
 # syn_mirror, turns on the forwarding of packets and lets the meetings, and the requests for a port to the first port, through the
 # firewall there is - fw4 of OpenWrt, the FORWARD and INPUT chains of iptables ( Docker, ufw ); `rules unload` takes them away.
 # The init script of OpenWrt and the service of systemd call it; anything else can too.
+# The fixed ports: "<port>:<key>[:<name>] ...". The records: "<name>:<write key>:<read key>[,<read key>...] ...". A key is 16
+# letters or digits, each other than the password and the other keys; an entry that is not is left out, and said.
 
 TABLE=/usr/share/syn-mirror/syn-mirror.nft
 # fw4: its forward and input chains take these files in
@@ -37,6 +39,57 @@ hex() {
 
 iptables_on() { command -v iptables >/dev/null && iptables -S FORWARD >/dev/null 2>&1; }
 
+# the keys taken so far, the password first: one key may not open two things
+taken=
+# key <key> <what it is for>: 0 - a key, not taken before; it is taken then
+key() {
+	case "$1" in
+	????????????????) ;;
+	*) echo "$2: the key must be 16 characters, not '$1': left out" >&2; return 1 ;;
+	esac
+	case "$1" in
+	*[!A-Za-z0-9]*) echo "$2: the key must be letters and digits, not '$1': left out" >&2; return 1 ;;
+	esac
+	case " $taken " in
+	*" $1 "*) echo "$2: the key $1 is the password or another key already: left out" >&2; return 1 ;;
+	esac
+	taken="$taken $1"
+}
+
+# the elements of the fixed ports and of the records, as commands of nft: "<port>:<key>[:<name>] ..." and
+# "<name>:<write key>:<read key>[,<read key>...] ..."
+settled() {
+	ports=
+	for f in $1; do
+		port=${f%%:*} rest=${f#*:}
+		k=${rest%%:*}
+		case "$port" in
+		''|*[!0-9]*) echo "the fixed port '$f': no port: left out" >&2; continue ;;
+		esac
+		if [ "$port" -le "$first" ] || [ "$port" -gt "$last" ]; then
+			echo "the fixed port $port: not of the ports of meeting, $((first + 1))-$last: left out" >&2
+			continue
+		fi
+		case " $ports " in
+		*" $port "*) echo "the fixed port $port: twice: the second left out" >&2; continue ;;
+		esac
+		key "$k" "the fixed port $port" || continue
+		ports="$ports $port"
+		echo "add element ip syn_mirror fixed { $port . 0x$(printf %s "$k" | hex) }"
+	done
+	for r in $2; do
+		name=${r%%:*} rest=${r#*:}
+		w=${rest%%:*} reads=${rest#*:}
+		[ "$reads" != "$rest" ] || reads=
+		key "$w" "the record $name" || continue
+		echo "add element ip syn_mirror writers { $first . 0x$(printf %s "$w" | hex) }"
+		for k in $(echo "$reads" | tr ',' ' '); do
+			key "$k" "a read key of the record $name" || continue
+			echo "add element ip syn_mirror readers { $first . 0x$(printf %s "$k" | hex) }"
+		done
+	done
+}
+
 # the elements of a set of the table there is, as a command that adds them anew - their time full again: the ports given and their
 # ids live on through a load, as their sides will not ask again
 kept() {
@@ -57,8 +110,9 @@ kept() {
 case "$1" in
 load)
 	password=$2 first=${3:-40000} last=${4:-49999} wait=${5:-60} tries=${6:-5} block=${7:-600} guard=${8:-1} short=${9:-20} guesses=${10:-5}
-	if [ "${#password}" -ne 8 ]; then
-		echo "the password must be 8 characters" >&2
+	fixed=${11} records=${12}
+	if [ "${#password}" -ne 16 ]; then
+		echo "the password must be 16 characters" >&2
 		exit 1
 	fi
 	case "$first$last$wait$tries$block$guard$short$guesses" in
@@ -71,18 +125,21 @@ load)
 		echo "the first port answers requests, the others are of meeting: the last port must be above the first" >&2
 		exit 1
 	fi
-	# the ports and their ids, when the table there is gives them to ids too: of SYN Mirror before the ids, the ports given are
-	# kept alone, and free again in `wait` seconds
-	keep=$(kept given; nft list set ip syn_mirror owned 2>/dev/null | grep -q '@ih,64,64' && kept owned; kept holder; kept guessing)
+	# the ports and their ids, when the table there is takes the id after a password of 16: of SYN Mirror before, the ports given
+	# are kept alone, and free again in `wait` seconds
+	keep=$(kept given; nft list set ip syn_mirror owned 2>/dev/null | grep -q "@ih,128,64" && kept owned; kept holder; kept guessing)
 	# the guard off, or no short meeting allowed at all: its lines left out
 	off=
 	if [ "$guard" = 0 ] || [ "$guesses" = 0 ]; then off='/# guard$/d'; fi
 	[ "$short" -gt 0 ] || short=20
+	taken=$password
+	settle=$(settled "$fixed" "$records")
 	# one transaction: the old table goes as the new one comes - no packet in between unruled; a table that fails leaves the old
 	{
 		echo 'add table ip syn_mirror'
 		echo 'delete table ip syn_mirror'
 		sed -e "s/@WAIT@/${wait}s/g" -e "s/@BLOCK@/${block}s/g" -e "s/@TRIES@/$tries/g" -e "s/@SHORT@/${short}s/g" -e "s/@GUESSES@/$guesses/g" "$TABLE" | if [ -n "$off" ]; then sed "$off"; else cat; fi
+		[ -n "$settle" ] && printf '%s\n' "$settle"
 		[ -n "$keep" ] && printf '%s\n' "$keep"
 	} | nft -D password=0x$(printf %s "$password" | hex) -D ports=$first-$last -D asks=$first -f - || exit 1
 	# a router forwards already; a computer starts to
@@ -121,7 +178,7 @@ unload)
 	exit 0
 	;;
 *)
-	echo "usage: $0 load <password> <first port> <last port> <wait seconds> <tries> <block seconds> [<guard 1|0> <short seconds> <guesses>] | unload" >&2
+	echo "usage: $0 load <password> <first port> <last port> <wait seconds> <tries> <block seconds> [<guard 1|0> <short seconds> <guesses> [<fixed ports> [<records>]]] | unload" >&2
 	exit 2
 	;;
 esac

@@ -3,12 +3,15 @@
 # service, as with any address: Remote Desktop Connection, ssh, a VNC viewer, a browser. Nothing is installed there.
 #
 #   syn-mirror-server.cmd                                                     a double click: asks, as a menu; the answers kept
-#   powershell -ExecutionPolicy Bypass -File syn-mirror-server.ps1 -Meet Tr7kQ2xZ@router.example.org:40000 -Forward 3389
+#   powershell -ExecutionPolicy Bypass -File syn-mirror-server.ps1 -Meet Tr7kQ2xZp4Lm9sWd@router.example.org:40000 -Forward 3389
 #
 # It asks the meeting point for a port of meeting - the password and its id, 8 random bytes of this start -, prints the line for the
 # client, the meeting point and that port, and from then on knocks and dials the port every second, from one local port. Each connection
-# that meets is joined to the server by .NET, both ways, the bytes as they are; the next one is awaited at once. Windows PowerShell
-# 5.1, as Windows has it, or PowerShell 7: nothing to install.
+# that meets is joined to the server by .NET, both ways, the bytes as they are; the next one is awaited at once.
+# A line with = in place of the @ - Fx2pL8wNq7Rk3mZa=router.example.org:41000 - is of a fixed port: no asking, its key alone
+# knocks at it. A meeting point whose address changes has its address kept by others: the line names them, each with a key of
+# reading - Tr7kQ2xZp4Lm9sWd@Rk8mP2qLx3Vb7NtY@203.0.113.7:40000,Hx4nT7wAc5Jd2QeL@198.51.100.9:40000 -, and the address is read
+# there, again every 30 s. Windows PowerShell 5.1, as Windows has it, or PowerShell 7: nothing to install.
 
 param([string]$Meet, [string]$Forward)
 
@@ -82,17 +85,52 @@ function Target([string]$t) {
     return $null
 }
 
-# The meeting point as its owner gave it, `password@point:port` - the page of SYN Mirror copies it so -: the password or $null, the
-# point, the port of requests. $null - no such line.
+# The meeting point as its owner gave it - the page of SYN Mirror copies it so -, one of
+#   <password>@<point>[:<port of requests>]                  a port of meeting given at each start
+#   <key>=<point>:<port>                                     a fixed port: its key alone opens it
+#   <password>@<read>@<keeper>[:<port>][,<read>@<keeper>...]  a point whose address changes: read from its keepers, in turn
+#   <key>=<read>@<keeper>[:<port>][,...]                     the same, of a fixed port: the port is read too
+# as @{ key; fixed; host; port } or @{ key; fixed; reads = @( @(key of reading, keeper, its port of requests), ... ) }: key $null
+# when the line has none. $null - no such line.
 function Point([string]$t) {
     $t = $t.Trim()
-    $password = $null
-    if ($t -match '^([^@]*)@(.*)$') { $password = $Matches[1]; $t = $Matches[2] }
-    if ($t -notmatch '^([^\s:@]+)(?::(\d+))?$') { return $null }
-    $asks = 40000
-    if ($Matches[2]) { $asks = [int]$Matches[2] }
-    return @{ password = $password; host = $Matches[1]; asks = $asks }
+    $p = @{ key = $null; fixed = $false; reads = $null; host = $null; port = 40000 }
+    $rest = $t
+    if ($t -match '^([^\s@=]*)([@=])(.*)$') {
+        if ($Matches[1]) { $p.key = $Matches[1] }
+        $p.fixed = $Matches[2] -eq '='
+        $rest = $Matches[3]
+    }
+    if ($rest.Contains('@')) {
+        $reads = @()
+        foreach ($r in $rest -split ',') {
+            if ($r.Trim() -cnotmatch '^([A-Za-z0-9]{16})@([^\s:@=,]+)(?::(\d+))?$') { return $null }
+            $asks = 40000
+            if ($Matches[3]) { $asks = [int]$Matches[3] }
+            $reads += , @($Matches[1], $Matches[2], $asks)
+        }
+        $p.reads = $reads
+        return $p
+    }
+    if ($rest -notmatch '^([^\s:@=,]+)(?::(\d+))?$') { return $null }
+    if ($p.fixed -and -not $Matches[2]) { return $null }
+    $p.host = $Matches[1]
+    if ($Matches[2]) { $p.port = [int]$Matches[2] }
+    return $p
 }
+
+# The line without its key, as the menu keeps it: = first for a fixed port, @ first when the address is read.
+function Rest-Of($p) {
+    if ($p.reads) { $where = ($p.reads | ForEach-Object { "$($_[0])@$($_[1]):$($_[2])" }) -join ',' } else { $where = "$($p.host):$($p.port)" }
+    if ($p.fixed) { return "=$where" }
+    if ($p.reads) { return "@$where" }
+    return $where
+}
+
+# The keys of reading hidden, for the screen.
+function Hidden([string]$t) { return $t -creplace '[A-Za-z0-9]{16}@', '****************@' }
+
+$Lines = 'such as Tr7kQ2xZp4Lm9sWd@router.example.org:40000, Fx2pL8wNq7Rk3mZa=router.example.org:41000 - a fixed port -, or Tr7kQ2xZp4Lm9sWd@Rk8mP2qLx3Vb7NtY@203.0.113.7:40000 - its address read there'
 
 # ── the menu, when nothing was given ──
 
@@ -132,27 +170,30 @@ function Menu {
         }
     }
     while ($true) {
-        if ($k.meet) { $typed = Read-Line "The meeting point - Enter for $($k.meet):" }
-        else { $typed = Read-Line 'The meeting point, as its owner gave it, such as Tr7kQ2xZ@router.example.org:40000:' }
+        if ($k.meet) { $typed = Read-Line "The meeting point - Enter for $(Hidden $k.meet):" }
+        else { $typed = Read-Line 'The meeting point, as its owner gave it, such as Tr7kQ2xZp4Lm9sWd@router.example.org:40000:' }
         if (-not $typed -and $k.meet) { $typed = $k.meet }
         $p = Point $typed
         if ($p) { break }
-        Say '💡' warn 'As its owner gave it - such as Tr7kQ2xZ@router.example.org:40000 - or a name or an address, and :port when its owner gave one'
+        Say '💡' warn "As its owner gave it - $Lines - or a name or an address, and :port when its owner gave one"
     }
-    $meet = "$($p.host):$($p.asks)"
-    $password = $p.password
-    if (-not $password -and $meet -eq $k.meet) { $password = $k.password }
-    while (-not $password -or $password.Length -ne 8) {
-        $password = Read-Line 'Its password, 8 characters:'
-        if ($password.Length -ne 8) { Say '💡' warn 'The password of a meeting point is 8 characters' }
+    $meet = Rest-Of $p
+    $key = $p.key
+    if (-not $key -and $meet -eq $k.meet) { $key = $k.password }
+    while (-not $key -or $key.Length -ne 16) {
+        if ($p.fixed) { $key = Read-Line 'The key of its fixed port, 16 characters:' } else { $key = Read-Line 'Its password, 16 characters:' }
+        if ($key.Length -ne 16) {
+            if ($p.fixed) { Say '💡' warn 'The key of a fixed port is 16 characters' } else { Say '💡' warn 'The password of a meeting point is 16 characters' }
+        }
     }
     $k.service = "$service"
     if ($service -eq 5) { $k.forward = $to }
     $k.meet = $meet
-    $k.password = $password
+    $k.password = $key
     Save-Kept $k
     Write-Host
-    return @($to, "$password@$meet")
+    if ($meet -match '^[@=]') { return @($to, "$key$meet") }
+    return @($to, "$key@$meet")
 }
 
 # ── the arguments, or the menu ──
@@ -177,8 +218,8 @@ if ($Forward -or $Meet) {
     $to, $given = Menu
 }
 $p = Point $given
-if (-not $p -or -not $p.password -or $p.password.Length -ne 8) { Fail '-Meet <password>@<meeting point>[:<port of requests>], such as Tr7kQ2xZ@router.example.org:40000' }
-$point = $p.host
+if (-not $p -or -not $p.key -or $p.key.Length -ne 16) { Fail "-Meet <the line of the meeting point>, $Lines" }
+$fixed = $p.fixed
 $isRdp = $to -match ":$RDP$"
 $toHost, $toPort = $to -split ':(?=\d+$)'
 
@@ -205,49 +246,106 @@ if ($isRdp) {
 
 # ── the meeting ──
 
-function Router-IP {
-    try { return [Net.Dns]::GetHostAddresses($point) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1 } catch { return $null }
+function Resolve-IP([string]$name) {
+    try { return [Net.Dns]::GetHostAddresses($name) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1 } catch { return $null }
 }
 
-# one socket for the request and the knocks: the NAT of this computer keeps one mapping for them. No error of an ICMP that came
-# back for a knock: Windows would end the next receive with it
+# one socket for the request, the knocks and the reads: the NAT of this computer keeps one mapping for them. No error of an ICMP
+# that came back for a knock: Windows would end the next receive with it
 $udp = New-Object Net.Sockets.UdpClient(0)
 try { [void]$udp.Client.IOControl(-1744830452, [byte[]](0, 0, 0, 0), $null) } catch { }
+$udp.Client.ReceiveTimeout = 1000
 $id = New-Object byte[] 8
 [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($id)
-[byte[]]$knock = [Text.Encoding]::ASCII.GetBytes($p.password) + $id
+# the knock: the password and the id; at a fixed port its key alone
+if ($fixed) { [byte[]]$knock = [Text.Encoding]::ASCII.GetBytes($p.key) }
+else { [byte[]]$knock = [Text.Encoding]::ASCII.GetBytes($p.key) + $id }
 
-$router = Router-IP
-if (-not $router) { Fail "The meeting point ${point}: no such address" }
-$asks = New-Object Net.IPEndPoint($router, $p.asks)
-$udp.Client.ReceiveTimeout = 1000
-$port = 0
-for ($i = 0; $i -lt 10 -and -not $port; $i++) {
-    [void]$udp.Send($knock, $knock.Length, $asks)
+# The answer of $length bytes from $to to what was sent there, within a second; $null - none.
+function Answer($to, [int]$length) {
     $until = [DateTime]::UtcNow.AddSeconds(1)
-    while (-not $port -and [DateTime]::UtcNow -lt $until) {
+    while ([DateTime]::UtcNow -lt $until) {
         try {
             $from = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)
             $got = $udp.Receive([ref]$from)
-            if ($got.Length -eq 2 -and $from.Equals($asks)) { $port = $got[0] * 256 + $got[1] }
-        } catch { break }
+            if ($got.Length -eq $length -and $from.Equals($to)) { return , $got }
+        } catch { return $null }
     }
+    return $null
 }
-if (-not $port) { Fail "No port of meeting from ${point}:$($p.asks): a wrong password, a wrong first port, this address is blocked for wrong knocks, or SYN Mirror there is older than its ids: update it" }
 
-$line = "${point}:$port"
-$bar = '─' * ($line.Length + 4)
-Write-Host
-Say '📨' news 'Send this line to whoever connects:'
-Write-Host "    ╭$bar╮" -ForegroundColor DarkGray
-Write-Host '    │  ' -NoNewline -ForegroundColor DarkGray; Write-Host $line -NoNewline -ForegroundColor Green; Write-Host '  │' -ForegroundColor DarkGray
-Write-Host "    ╰$bar╯" -ForegroundColor DarkGray
-try { Set-Clipboard -Value $line; Say '📋' good 'It is in your clipboard already: just paste it into a message' } catch { }
-if ($isRdp) { Say '🖥️' news "Remote Desktop Connection ( mstsc ) of the client: as the computer, $line" }
-elseif ($toPort -eq '22') { Say '🔐' news "On the client: ssh -p $port <user>@$point" }
-elseif ($toPort -eq '80') { Say '🌐' news "A browser of the client: http://$line" }
-else { Say '🔗' news "A program of the client reaches $to at $line" }
-Write-Host
+# Where the meeting point is now: @{ ip; port - to ask or knock at -; name - in the line for the client }. Its name looked up
+# again; or, of a changing address, read from its keepers in turn - an answer written within 2 minutes taken at once, else the
+# freshest. $null - not found.
+function Locate {
+    if (-not $p.reads) {
+        $ip = Resolve-IP $p.host
+        if (-not $ip) { return $null }
+        return @{ ip = $ip; port = $p.port; name = $p.host }
+    }
+    $best = $null
+    foreach ($r in $p.reads) {
+        $ip = Resolve-IP $r[1]
+        if (-not $ip) { continue }
+        $to = New-Object Net.IPEndPoint($ip, [int]$r[2])
+        [byte[]]$read = [Text.Encoding]::ASCII.GetBytes($r[0])
+        $got = $null
+        for ($i = 0; $i -lt 3 -and -not $got; $i++) {
+            [void]$udp.Send($read, $read.Length, $to)
+            $got = Answer $to 7
+        }
+        if (-not $got) { continue }
+        # the address, the port, the minutes since the meeting point last wrote them
+        $at = [Net.IPAddress]::new([byte[]]$got[0..3])
+        $found = @{ ip = $at; port = $got[4] * 256 + $got[5]; name = "$at"; age = [int]$got[6] }
+        if ($found.age -le 2) { return $found }
+        if (-not $best -or $found.age -lt $best.age) { $best = $found }
+    }
+    return $best
+}
+
+# A port of meeting from the meeting point: the password and the id to its port of requests, up to 10 times. The same id gets
+# the port it holds again. 0 - no answer.
+function Ask($at) {
+    $to = New-Object Net.IPEndPoint($at.ip, [int]$at.port)
+    for ($i = 0; $i -lt 10; $i++) {
+        [void]$udp.Send($knock, $knock.Length, $to)
+        $got = Answer $to 2
+        if ($got) { return $got[0] * 256 + $got[1] }
+    }
+    return 0
+}
+
+$keepers = ''
+if ($p.reads) { $keepers = ($p.reads | ForEach-Object { "$($_[1]):$($_[2])" }) -join ', ' }
+$at = Locate
+while (-not $at) {
+    if (-not $p.reads) { Fail "The meeting point $($p.host): no such address" }
+    Say '❌' bad "No address of the meeting point from ${keepers}: a wrong key of reading, the meeting point has not written its address there yet, or this address is blocked for wrong keys. Again in 5 s"
+    Start-Sleep 5
+    $at = Locate
+}
+if ($fixed) { $port = $at.port } else { $port = Ask $at }
+if (-not $port) { Fail "No port of meeting from $($at.name):$($at.port): a wrong password, a wrong first port, this address is blocked for wrong knocks, or SYN Mirror there is of before the passwords of 16 characters: update it" }
+
+# The line for the client, in a box and in the clipboard, and how its program takes it.
+function Show {
+    $line = "$($at.name):$port"
+    $bar = '─' * ($line.Length + 4)
+    Write-Host
+    Say '📨' news 'Send this line to whoever connects:'
+    Write-Host "    ╭$bar╮" -ForegroundColor DarkGray
+    Write-Host '    │  ' -NoNewline -ForegroundColor DarkGray; Write-Host $line -NoNewline -ForegroundColor Green; Write-Host '  │' -ForegroundColor DarkGray
+    Write-Host "    ╰$bar╯" -ForegroundColor DarkGray
+    try { Set-Clipboard -Value $line; Say '📋' good 'It is in your clipboard already: just paste it into a message' } catch { }
+    if ($isRdp) { Say '🖥️' news "Remote Desktop Connection ( mstsc ) of the client: as the computer, $line" }
+    elseif ($toPort -eq '22') { Say '🔐' news "On the client: ssh -p $port <user>@$($at.name)" }
+    elseif ($toPort -eq '80') { Say '🌐' news "A browser of the client: http://$line" }
+    else { Say '🔗' news "A program of the client reaches $to at $line" }
+    Write-Host
+}
+Show
+if ($fixed) { Say '💡' quiet 'A fixed port answers no knock: if the client gets nothing, check the key with the owner of the meeting point' }
 Say '👀' wait 'Waiting for whoever connects…'
 
 # the connections joined now: each way a copy of .NET, on its own; a way that ended tells the other side, a pair that ended goes
@@ -275,28 +373,55 @@ function Join-To($came) {
     [void]$pairs.Add(@{ came = $came; there = $there; up = $a.CopyToAsync($b, 65536); down = $b.CopyToAsync($a, 65536); upShut = $false; downShut = $false })
 }
 
+# the local port the dialing goes from: kept till someone comes - the meeting point that moves too knows the server by it
+$from = 0
+# the port of meeting is not sure at the address of now: asked again at the next look
+$unsure = $false
+$look = [DateTime]::UtcNow.AddSeconds(30)
 while ($true) {
-    # a meeting point of a dynamic address: its name looked up for each meeting
-    $router = Router-IP
-    if (-not $router) { Say '❌' bad "The meeting point ${point}: no such address"; Start-Sleep 5; continue }
-    $at = New-Object Net.IPEndPoint($router, $port)
+    $dial = New-Object Net.IPEndPoint($at.ip, [int]$port)
     # knocks and dials till someone comes, from one local port: the NAT keeps one mapping; the next one from a new local port
-    $from = 0
-    while ($true) {
+    $met = $false
+    while (-not $met -and [DateTime]::UtcNow -lt $look) {
         Tend
-        [void]$udp.Send($knock, $knock.Length, $at)
+        [void]$udp.Send($knock, $knock.Length, $dial)
         $started = [DateTime]::UtcNow
         $tcp = New-Object Net.Sockets.Socket('InterNetwork', 'Stream', 'Tcp')
         $tcp.SetSocketOption('Socket', 'ReuseAddress', $true)
         $tcp.Bind((New-Object Net.IPEndPoint([Net.IPAddress]::Any, $from)))
         $from = $tcp.LocalEndPoint.Port
-        $try = $tcp.BeginConnect($at, $null, $null)
-        $met = $false
+        $try = $tcp.BeginConnect($dial, $null, $null)
         if ($try.AsyncWaitHandle.WaitOne(1000)) { try { $tcp.EndConnect($try); $met = $true } catch { } }
-        if ($met) { Join-To $tcp; break }
+        if ($met) { Join-To $tcp; $from = 0; break }
         $tcp.Close()
         # refused at once: the port is not open yet, or the network is down - a pause, not a storm of tries
         $rest = 1000 - ([DateTime]::UtcNow - $started).TotalMilliseconds
         if ($rest -gt 0) { Start-Sleep -Milliseconds ([int]$rest) }
+    }
+    if ($met) { continue }
+    # every 30 s: where the meeting point is now - a dynamic address moves; its name looked up again, or its address read again
+    $look = [DateTime]::UtcNow.AddSeconds(30)
+    $now = Locate
+    if (-not $now) {
+        if ($p.reads) { Say '⚠️' warn "No address of the meeting point from $keepers now: knocking on at the one of before" }
+        else { Say '⚠️' warn "The meeting point $($p.host): no such address now: knocking on at the one of before" }
+        continue
+    }
+    $moved = -not $now.ip.Equals($at.ip) -or $now.port -ne $at.port
+    if (-not $moved -and -not $unsure) { continue }
+    $was = "$($at.name):$port"
+    $at = $now
+    if ($fixed) { $port = $at.port }
+    else {
+        $got = Ask $at
+        if ($got) { $port = $got; $unsure = $false }
+        else { $unsure = $true; Say '⚠️' warn "No port of meeting from $($at.name):$($at.port) now: knocking at $port there, asking again in 30 s" }
+    }
+    if ("$($at.name):$port" -ne $was) {
+        Say '🔀' news 'The meeting point moved: the line for the client is new'
+        Show
+        Say '👀' wait 'Waiting for whoever connects…'
+    } elseif ($moved) {
+        Say '🔀' quiet "The meeting point moved to $($at.ip): the line for the client stays"
     }
 }

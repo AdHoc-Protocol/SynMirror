@@ -45,12 +45,12 @@ nft list table ip syn_mirror >/dev/null || { echo "the table syn_mirror is not l
 ubus call service list '{"name":"syn-mirror"}' | grep -q '"running": true' || { echo "give does not run"; bad=1; }
 
 # again: an update, the settings and the ports given kept
-uci set syn-mirror.main.password=Keep1234
+uci set syn-mirror.main.password=Keep1234Keep5678
 uci commit syn-mirror
 nft add element ip syn_mirror given { 41234 }
 cp /src/syn-mirror-openwrt.sh /tmp/
 sh /tmp/syn-mirror-openwrt.sh >/dev/null
-[ "$(uci -q get syn-mirror.main.password)" = Keep1234 ] || { echo "installing again lost the password"; bad=1; }
+[ "$(uci -q get syn-mirror.main.password)" = Keep1234Keep5678 ] || { echo "installing again lost the password"; bad=1; }
 nft get element ip syn_mirror given { 41234 } >/dev/null 2>&1 || { echo "installing again lost the ports given"; bad=1; }
 
 cp /src/syn-mirror-openwrt.sh /tmp/

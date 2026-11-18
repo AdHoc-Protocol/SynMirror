@@ -4,12 +4,15 @@
 # of that service, as with any address: Remote Desktop Connection, ssh, a VNC viewer, a browser. Nothing is installed there.
 #
 #   perl syn-mirror-server.pl                                              asks, as a menu; the answers kept for the next start
-#   perl syn-mirror-server.pl --meet Tr7kQ2xZ@router.example.org:40000 --forward 22
+#   perl syn-mirror-server.pl --meet Tr7kQ2xZp4Lm9sWd@router.example.org:40000 --forward 22
 #
 # It asks the meeting point for a port of meeting - the password and its id, 8 random bytes of this start -, prints the line for the
 # client, the meeting point and that port, and from then on knocks and dials the port every second, from one local port. Each connection
 # that meets is joined to the server, in a process of its own: the bytes go as they are, both ways. The next one is awaited at once.
-# Only perl and its own modules: nothing to install.
+# A line with = in place of the @ - Fx2pL8wNq7Rk3mZa=router.example.org:41000 - is of a fixed port: no asking, its key alone
+# knocks at it. A meeting point whose address changes has its address kept by others: the line names them, each with a key of
+# reading - Tr7kQ2xZp4Lm9sWd@Rk8mP2qLx3Vb7NtY@203.0.113.7:40000,Hx4nT7wAc5Jd2QeL@198.51.100.9:40000 -, and the address is read
+# there, again every 30 s. Only perl and its own modules: nothing to install.
 
 use strict;
 use warnings;
@@ -18,6 +21,7 @@ use IO::Socket::INET;
 use IO::Select;
 use Socket qw(PF_INET SOCK_STREAM SOL_SOCKET SO_ERROR SO_REUSEADDR IPPROTO_TCP TCP_NODELAY INADDR_ANY inet_aton pack_sockaddr_in unpack_sockaddr_in);
 use POSIX qw(EINPROGRESS);
+use Time::HiRes ();
 use File::Basename qw(dirname);
 use File::Spec;
 
@@ -105,15 +109,42 @@ sub target {
     return undef;
 }
 
-# The meeting point as its owner gave it, `password@point:port` - the page of SYN Mirror copies it so -: the password, or undef,
-# the point, the port of requests. undef - no such line.
+# The meeting point as its owner gave it - the page of SYN Mirror copies it so -, one of
+#   <password>@<point>[:<port of requests>]                  a port of meeting given at each start
+#   <key>=<point>:<port>                                     a fixed port: its key alone opens it
+#   <password>@<read>@<keeper>[:<port>][,<read>@<keeper>...]  a point whose address changes: read from its keepers, in turn
+#   <key>=<read>@<keeper>[:<port>][,...]                     the same, of a fixed port: the port is read too
+# as { key, fixed, host, port } or { key, fixed, reads => [ [ key of reading, keeper, its port of requests ], ... ] }: key undef
+# when the line has none. undef - no such line.
 sub point {
     my ($t) = @_;
     $t =~ s/^\s+|\s+$//g;
-    my $password = $t =~ s/^([^@]*)@// ? $1 : undef;
-    my ($host, $asks) = $t =~ /^([^\s:@]+)(?::(\d+))?$/ or return;
-    return ($password, $host, $asks // 40000);
+    my ($key, $mark, $rest) = $t =~ /^([^\s@=]*)([@=])(.*)$/ ? ($1, $2, $3) : (undef, '@', $t);
+    my %p = (key => (defined $key && $key ne '' ? $key : undef), fixed => $mark eq '=');
+    if ($rest =~ /@/) {
+        for (split /,/, $rest) {
+            my ($read, $keeper, $asks) = /^\s*([A-Za-z0-9]{16})@([^\s:@=,]+)(?::(\d+))?\s*$/ or return;
+            push @{$p{reads}}, [$read, $keeper, $asks // 40000];
+        }
+        return \%p;
+    }
+    my ($host, $port) = $rest =~ /^([^\s:@=,]+)(?::(\d+))?$/ or return;
+    return if $p{fixed} && !defined $port;
+    @p{qw(host port)} = ($host, $port // 40000);
+    return \%p;
 }
+
+# The line without its key, as the menu keeps it: = first for a fixed port, @ first when the address is read.
+sub rest_of {
+    my ($p) = @_;
+    my $where = $p->{reads} ? join(',', map { "$_->[0]\@$_->[1]:$_->[2]" } @{$p->{reads}}) : "$p->{host}:$p->{port}";
+    return $p->{fixed} ? "=$where" : $p->{reads} ? "\@$where" : $where;
+}
+
+# The keys of reading hidden, for the screen.
+sub hidden { (my $t = $_[0] // '') =~ s/[A-Za-z0-9]{16}@/****************@/g; return $t }
+
+my $LINES = 'such as Tr7kQ2xZp4Lm9sWd@router.example.org:40000, Fx2pL8wNq7Rk3mZa=router.example.org:41000 - a fixed port -, or Tr7kQ2xZp4Lm9sWd@Rk8mP2qLx3Vb7NtY@203.0.113.7:40000 - its address read there';
 
 # ── the menu, when nothing was given ──
 
@@ -150,29 +181,29 @@ sub menu {
             say('💡', 'warn', 'A port, such as 8080, or an address and a port, such as 192.168.1.5:80');
         }
     }
-    my ($password, $meet);
+    my ($p, $meet);
     while (1) {
-        my $typed = line($k->{meet} ? "The meeting point - Enter for $k->{meet}:" : 'The meeting point, as its owner gave it, such as Tr7kQ2xZ@router.example.org:40000:');
+        my $typed = line($k->{meet} ? 'The meeting point - Enter for ' . hidden($k->{meet}) . ':' : 'The meeting point, as its owner gave it, such as Tr7kQ2xZp4Lm9sWd@router.example.org:40000:');
         $typed = $k->{meet} if $typed eq '' && $k->{meet};
-        my ($with, $host, $asks) = point($typed // '');
-        if (defined $host) {
-            $meet = "$host:$asks";
-            $password = $with // ($meet eq ($k->{meet} // '') ? $k->{password} : undef);
+        if ($p = point($typed // '')) {
+            $meet = rest_of($p);
+            $p->{key} //= $meet eq ($k->{meet} // '') ? $k->{password} : undef;
             last;
         }
-        say('💡', 'warn', 'As its owner gave it - such as Tr7kQ2xZ@router.example.org:40000 - or a name or an address, and :port when its owner gave one');
+        say('💡', 'warn', "As its owner gave it - $LINES - or a name or an address, and :port when its owner gave one");
     }
-    until (defined $password && length $password == 8) {
-        $password = line('Its password, 8 characters:');
-        say('💡', 'warn', 'The password of a meeting point is 8 characters') unless length $password == 8;
+    my $what = $p->{fixed} ? 'The key of its fixed port' : 'Its password';
+    until (defined $p->{key} && length $p->{key} == 16) {
+        $p->{key} = line("$what, 16 characters:");
+        say('💡', 'warn', $p->{fixed} ? 'The key of a fixed port is 16 characters' : 'The password of a meeting point is 16 characters') unless length $p->{key} == 16;
     }
     $k->{service} = $service;
     $k->{forward} = $forward if $service == 5;
     $k->{meet} = $meet;
-    $k->{password} = $password;
+    $k->{password} = $p->{key};
     save_kept($k);
     print "\n";
-    return ($forward, "$password\@$meet");
+    return ($forward, $p->{key} . ($meet =~ /^[@=]/ ? $meet : "\@$meet"));
 }
 
 # ── the arguments, or the menu ──
@@ -182,7 +213,9 @@ while (my $a = shift @ARGV) {
     if ($a eq '--forward') { $forward = target(shift(@ARGV) // '') or die "--forward <port> or <address:port>, such as 22 or 192.168.1.5:80\n" }
     elsif ($a eq '--meet') { $given = shift @ARGV }
     else {
-        print "perl syn-mirror-server.pl [--meet <password>\@<meeting point>[:40000] --forward <port> | <address:port>]\n",
+        print "perl syn-mirror-server.pl [--meet <the line of the meeting point> --forward <port> | <address:port>]\n",
+            "  the line as its owner gave it: <password>\@<meeting point>[:40000], <key>=<meeting point>:<fixed port>, or either\n",
+            "  with the address read: <password>\@<key of reading>\@<keeper>:<port>[,...]\n",
             "  with no arguments it asks, and keeps the answers beside it\n";
         exit 2;
     }
@@ -195,9 +228,9 @@ if (!defined $forward || !defined $given) {
     die "no terminal to ask in: give --meet and --forward\n" unless -t STDIN;
     ($forward, $given) = menu();
 }
-my ($password, $host, $asks) = point($given);
-die "--meet <password>\@<meeting point>[:<port of requests>], such as Tr7kQ2xZ\@router.example.org:40000\n"
-    unless defined $host && defined $password && length $password == 8;
+my $p = point($given);
+die "--meet <the line of the meeting point>, $LINES\n" unless $p && defined $p->{key} && length $p->{key} == 16;
+my $fixed = $p->{fixed};
 my $rdp = $forward =~ /:$RDP$/;
 
 say('💤', 'warn', 'To connect later, this computer must stay on and awake while this runs: asleep, it lets nobody in, and a minute later the meeting point gives its port to others');
@@ -219,65 +252,125 @@ if ($rdp) {
 
 # ── the meeting ──
 
-sub ipv4 {
-    my $ip = inet_aton($host);
-    return $ip;
-}
-
-# one socket for the request and the knocks: the NAT of this computer keeps one mapping for them
+# one socket for the request, the knocks and the reads: the NAT of this computer keeps one mapping for them
 my $udp = IO::Socket::INET->new(Proto => 'udp', LocalAddr => '0.0.0.0') or die "UDP: $!\n";
+my $sel = IO::Select->new($udp);
 my $id = '';
 if (open my $r, '<:raw', '/dev/urandom') { read $r, $id, 8; close $r }
 $id = pack('N2', int(rand(2**32)), int(rand(2**32))) if length $id != 8;
-my $knock = $password . $id;
+# the knock: the password and the id; at a fixed port its key alone
+my $knock = $fixed ? $p->{key} : $p->{key} . $id;
 utf8::downgrade($knock);
 
-my $router = ipv4() or die "The meeting point $host: no such address\n";
-my $port;
-ASK: for (1 .. 10) {
-    send($udp, $knock, 0, pack_sockaddr_in($asks, $router));
-    my $sel = IO::Select->new($udp);
-    my $until = time + 1;
-    while ($sel->can_read(1)) {
-        my $from = recv($udp, my $got, 16, 0);
-        if (defined $from && length $got == 2) { $port = unpack('n', $got); last ASK }
-        last if time >= $until;
+# The answer of `length` bytes from `to` to what was sent there, within a second; undef - none.
+sub answer {
+    my ($to, $length) = @_;
+    my ($port, $ip) = unpack_sockaddr_in($to);
+    my $until = Time::HiRes::time() + 1;
+    while ((my $left = $until - Time::HiRes::time()) > 0) {
+        last unless $sel->can_read($left);
+        my $from = recv($udp, my $got, 64, 0);
+        next unless defined $from && length $got == $length;
+        my ($fport, $fip) = unpack_sockaddr_in($from);
+        return $got if $fport == $port && $fip eq $ip;
     }
+    return undef;
 }
+
+# Where the meeting point is now: [ its address, packed; the port to ask or knock at; its name in the line for the client ]. Its
+# name looked up again; or, of a changing address, read from its keepers in turn - an answer written within 2 minutes taken at
+# once, else the freshest. undef - not found.
+sub locate {
+    unless ($p->{reads}) {
+        my $ip = inet_aton($p->{host}) or return undef;
+        return [$ip, $p->{port}, $p->{host}];
+    }
+    my $best;
+    for my $r (@{$p->{reads}}) {
+        my ($read, $keeper, $asks) = @$r;
+        utf8::downgrade($read);
+        my $ip = inet_aton($keeper) or next;
+        my $to = pack_sockaddr_in($asks, $ip);
+        my $got;
+        for (1 .. 3) {
+            send($udp, $read, 0, $to);
+            last if defined($got = answer($to, 7));
+        }
+        next unless defined $got;
+        # the address, the port, the minutes since the meeting point last wrote them
+        my ($at, $port, $age) = unpack('a4 n C', $got);
+        my $found = [$at, $port, inet_ntoa($at), $age];
+        return $found if $age <= 2;
+        $best = $found if !$best || $age < $best->[3];
+    }
+    return $best;
+}
+
+# A port of meeting from the meeting point: the password and the id to its port of requests, up to 10 times. The same id gets
+# the port it holds again. undef - no answer.
+sub ask {
+    my ($at) = @_;
+    my $to = pack_sockaddr_in($at->[1], $at->[0]);
+    for (1 .. 10) {
+        send($udp, $knock, 0, $to);
+        my $got = answer($to, 2);
+        return unpack('n', $got) if defined $got;
+    }
+    return undef;
+}
+
+my $keepers = $p->{reads} ? join(', ', map { "$_->[1]:$_->[2]" } @{$p->{reads}}) : '';
+my $at = locate();
+until ($at) {
+    die "The meeting point $p->{host}: no such address\n" unless $p->{reads};
+    say('❌', 'bad', "No address of the meeting point from $keepers: a wrong key of reading, the meeting point has not written its address there yet, or this address is blocked for wrong keys. Again in 5 s");
+    sleep 5;
+    $at = locate();
+}
+my $port = $fixed ? $at->[1] : ask($at);
 unless ($port) {
-    say('❌', 'bad', "No port of meeting from $host:$asks: a wrong password, a wrong first port, this address is blocked for wrong knocks, or SYN Mirror there is older than its ids: update it");
+    say('❌', 'bad', "No port of meeting from $at->[2]:$at->[1]: a wrong password, a wrong first port, this address is blocked for wrong knocks, or SYN Mirror there is of before the passwords of 16 characters: update it");
     exit 1;
 }
 
-my $line = "$host:$port";
-my $bar = '─' x (length($line) + 4);
-print "\n";
-say('📨', 'news', 'Send this line to whoever connects:');
-print '    ', paint("╭$bar╮", 'quiet'), "\n    ", paint('│  ', 'quiet'), paint($line, 'good'), paint('  │', 'quiet'), "\n    ", paint("╰$bar╯", 'quiet'), "\n";
-my $copied;
-for my $tool (['pbcopy'], ['wl-copy'], ['xclip', '-selection', 'clipboard'], ['xsel', '-ib']) {
-    next unless grep { -x "$_/$tool->[0]" } split /:/, ($ENV{PATH} // '');
-    next if $tool->[0] =~ /^x/ && !$ENV{DISPLAY};
-    next if $tool->[0] eq 'wl-copy' && !$ENV{WAYLAND_DISPLAY};
-    if (open my $c, '|-', @$tool) { print $c $line; $copied = close $c }
-    last if $copied;
+# The line for the client, in a box and in the clipboard, and how its program takes it.
+sub show {
+    my $host = $at->[2];
+    my $line = "$host:$port";
+    my $bar = '─' x (length($line) + 4);
+    print "\n";
+    say('📨', 'news', 'Send this line to whoever connects:');
+    print '    ', paint("╭$bar╮", 'quiet'), "\n    ", paint('│  ', 'quiet'), paint($line, 'good'), paint('  │', 'quiet'), "\n    ", paint("╰$bar╯", 'quiet'), "\n";
+    my $copied;
+    for my $tool (['pbcopy'], ['wl-copy'], ['xclip', '-selection', 'clipboard'], ['xsel', '-ib']) {
+        next unless grep { -x "$_/$tool->[0]" } split /:/, ($ENV{PATH} // '');
+        next if $tool->[0] =~ /^x/ && !$ENV{DISPLAY};
+        next if $tool->[0] eq 'wl-copy' && !$ENV{WAYLAND_DISPLAY};
+        if (open my $c, '|-', @$tool) { print $c $line; $copied = close $c }
+        last if $copied;
+    }
+    say('📋', 'good', 'It is in your clipboard already: just paste it into a message') if $copied;
+    if ($rdp) { say('🖥️', 'news', "Remote Desktop Connection ( mstsc ) of the client: as the computer, $line") }
+    elsif ($forward =~ /:22$/) { say('🔐', 'news', "On the client: ssh -p $port <user>\@$host") }
+    elsif ($forward =~ /:80$/) { say('🌐', 'news', "A browser of the client: http://$line") }
+    else { say('🔗', 'news', "A program of the client reaches $forward at $line") }
+    print "\n";
 }
-say('📋', 'good', 'It is in your clipboard already: just paste it into a message') if $copied;
-if ($rdp) { say('🖥️', 'news', "Remote Desktop Connection ( mstsc ) of the client: as the computer, $line") }
-elsif ($forward =~ /:22$/) { say('🔐', 'news', "On the client: ssh -p $port <user>\@$host") }
-elsif ($forward =~ /:80$/) { say('🌐', 'news', "A browser of the client: http://$line") }
-else { say('🔗', 'news', "A program of the client reaches $forward at $line") }
-print "\n";
+show();
+say('💡', 'quiet', 'A fixed port answers no knock: if the client gets nothing, check the key with the owner of the meeting point') if $fixed;
 say('👀', 'wait', 'Waiting for whoever connects…');
 
 $SIG{CHLD} = 'IGNORE'; # each connection lives in a process of its own, gone with it
 
-# Knocks at the port and dials it until someone comes - from one local port, so the NAT keeps one mapping: the connection.
+# the local port the dialing goes from: kept till someone comes - the meeting point that moves too knows the server by it
+my $from = 0;
+
+# Knocks at the port and dials it until someone comes or `until` - from one local port, so the NAT keeps one mapping: the
+# connection. undef - nobody came by then.
 sub once {
-    my ($at) = @_;
-    my $from = 0;
-    while (1) {
-        send($udp, $knock, 0, $at);
+    my ($to, $until) = @_;
+    while (time < $until) {
+        send($udp, $knock, 0, $to);
         my $started = time;
         # bound by hand: IO::Socket::INET binds no port 0, and then each try would go from another port
         my $tcp = IO::Socket::INET->new;
@@ -285,7 +378,7 @@ sub once {
             && bind($tcp, pack_sockaddr_in($from, INADDR_ANY)) or do { say('❌', 'bad', "TCP: $!"); sleep 1; next };
         $from = (unpack_sockaddr_in(getsockname($tcp)))[0];
         $tcp->blocking(0);
-        if (connect($tcp, $at) || $! == EINPROGRESS) {
+        if (connect($tcp, $to) || $! == EINPROGRESS) {
             if (IO::Select->new($tcp)->can_write(1) && !$tcp->getsockopt(SOL_SOCKET, SO_ERROR)) {
                 $tcp->blocking(1);
                 return $tcp;
@@ -295,6 +388,7 @@ sub once {
         # refused at once: the port is not open yet, or the network is down - a pause, not a storm of tries
         select(undef, undef, undef, 1 - (time - $started)) if time - $started < 1;
     }
+    return undef;
 }
 
 # A connection that met, joined to the service till both sides end: each end told the other.
@@ -325,12 +419,43 @@ sub join_to {
     say('👋', 'quiet', 'Gone, the one who came');
 }
 
+# the port of meeting is not sure at the address of now: asked again at the next look
+my $unsure = 0;
+my $look = time + 30;
 while (1) {
-    # a meeting point of a dynamic address: its name looked up for each meeting
-    my $ip = ipv4() or do { say('❌', 'bad', "The meeting point $host: no such address"); sleep 5; next };
-    my $came = once(pack_sockaddr_in($port, $ip));
-    my $pid = fork;
-    if (!defined $pid) { say('❌', 'bad', "fork: $!"); close $came; next }
-    if ($pid == 0) { close $udp; join_to($came); exit 0 }
-    close $came;
+    my $came = once(pack_sockaddr_in($port, $at->[0]), $look);
+    if ($came) {
+        $from = 0;
+        my $pid = fork;
+        if (!defined $pid) { say('❌', 'bad', "fork: $!"); close $came; next }
+        if ($pid == 0) { close $udp; join_to($came); exit 0 }
+        close $came;
+        next;
+    }
+    # every 30 s: where the meeting point is now - a dynamic address moves; its name looked up again, or its address read again
+    $look = time + 30;
+    my $now = locate() or do {
+        say('⚠️', 'warn', $p->{reads} ? "No address of the meeting point from $keepers now: knocking on at the one of before" : "The meeting point $p->{host}: no such address now: knocking on at the one of before");
+        next;
+    };
+    my $moved = $now->[0] ne $at->[0] || $now->[1] != $at->[1];
+    next unless $moved || $unsure;
+    my $was = "$at->[2]:$port";
+    $at = $now;
+    if ($fixed) {
+        $port = $at->[1];
+    } elsif (my $got = ask($at)) {
+        $port = $got;
+        $unsure = 0;
+    } else {
+        $unsure = 1;
+        say('⚠️', 'warn', "No port of meeting from $at->[2]:$at->[1] now: knocking at $port there, asking again in 30 s");
+    }
+    if ("$at->[2]:$port" ne $was) {
+        say('🔀', 'news', 'The meeting point moved: the line for the client is new');
+        show();
+        say('👀', 'wait', 'Waiting for whoever connects…');
+    } elsif ($moved) {
+        say('🔀', 'quiet', 'The meeting point moved to ' . inet_ntoa($at->[0]) . ': the line for the client stays');
+    }
 }

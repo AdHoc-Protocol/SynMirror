@@ -4,7 +4,8 @@
 # of GitHub runs it:
 #   sh pack.sh openwrt syn-mirror-openwrt.sh   OpenWRT/install.sh, the files of OpenWRT/files and OpenWRT/luci but the Makefiles;
 #                                              the router holds in /tmp only this file, erased at the end
-#   sh pack.sh linux syn-mirror-linux.sh       Linux/install.sh, the files of Linux and the rules of OpenWRT/files
+#   sh pack.sh linux syn-mirror-linux.sh       Linux/install.sh, the files of Linux - the command syn-mirror among them - and the
+#                                              rules of OpenWRT/files
 # The lines end in LF there: a CR of a checkout on Windows is dropped.
 
 set -e
@@ -23,7 +24,7 @@ openwrt)
 linux)
 	base=$here
 	installer=$base/Linux/install.sh
-	list='Linux/give.pl Linux/syn-mirror.conf Linux/syn-mirror.service OpenWRT/files/rules OpenWRT/files/syn-mirror.nft'
+	list='Linux/give.pl Linux/syn-mirror Linux/syn-mirror.conf Linux/syn-mirror.service OpenWRT/files/rules OpenWRT/files/syn-mirror.nft'
 	about='# SYN Mirror for a Linux computer in one file:
 #   sudo sh syn-mirror-linux.sh
 # and to remove it, with the settings:

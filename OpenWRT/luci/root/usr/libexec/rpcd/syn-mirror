@@ -15,12 +15,20 @@
 #   tries     what came in the last 10 minutes, the newest first, 30 at most: seconds ago, from - address and source port - the
 #             port of the range, and what - request, knock ( with the id the port is given to ), stranger ( a knock with another
 #             id ), wrong ( password ), blocked ( the address is blocked ), dial-a ( a SYN of an address that knocked with the id ),
-#             dial ( a SYN of another ), guessing ( a SYN of an address blocked at that port for guessing ); `tries_all` - how many
-#             there are in all
+#             dial ( a SYN of another ), guessing ( a SYN of an address blocked at that port for guessing ), wrote ( a meeting
+#             point of a changing address wrote its address ), read ( a server read an address ); `tries_all` - how many there
+#             are in all
+#   records   the addresses meeting points of changing addresses wrote here, as `give` keeps them: the name of the record, the
+#             address, the port to knock at, seconds since the last write
+#   reports   the meeting points this router writes its own address to: where, the port written, seconds since the last write
+#             and since the last answer - none, never - and the address of this router as that meeting point saw it
 # `ubus call syn-mirror uninstall` - takes SYN Mirror off the router, this script too: it answers first, and the removal starts a
 # second later, apart from rpcd.
 
 . /usr/share/libubox/jshn.sh
+
+# what `give` keeps of the records and the reports, rewritten as they change
+STATE=/tmp/syn-mirror
 
 # the sets of the table as nft lists it, in one pass: "P <port> <free in> <the server or -> <held|open|dialing> <dials from or ->"
 # for each port given, then "B <address> <blocked for> <port or ->" for each blocked one - at a port: it guessed passwords there. What `expires` says is cut to seconds: "52s880ms" ->
@@ -89,6 +97,8 @@ tries() {
 			for (i = 1; i <= t; i++) {
 				k = kind[i]; mine = (port[i] " " addr[i]) in owner
 				if (k == "t_asked") k = "request"
+				else if (k == "t_wrote") k = "wrote"
+				else if (k == "t_read") k = "read"
 				else if (k == "t_knocked") k = mine ? "knock" : "stranger"
 				else if (k == "t_refused") k = (addr[i] in blocked) ? "blocked" : "wrong"
 				else k = mine ? "dial-a" : ((addr[i] " " port[i]) in guessing) ? "guessing" : "dial"
@@ -201,7 +211,45 @@ status() {
 	EOF
 	json_close_array
 
+	# the times of the files are those of the clock: seconds since, never below 0
+	now=$(date +%s)
+	json_add_array records
+	while read -r name ip port at; do
+		[ -n "$at" ] || continue
+		json_add_object
+		json_add_string name "$name"
+		json_add_string address "$ip"
+		json_add_int port "$port"
+		json_add_int ago "$(since "$at")"
+		json_close_object
+	done <<-EOF
+	$(cat "$STATE/records" 2>/dev/null)
+	EOF
+	json_close_array
+
+	json_add_array reports
+	while read -r to port sent answered seen; do
+		[ -n "$seen" ] || continue
+		json_add_object
+		json_add_string to "$to"
+		json_add_int port "$port"
+		[ "$sent" != 0 ] && json_add_int sent "$(since "$sent")"
+		[ "$answered" != 0 ] && json_add_int answered "$(since "$answered")"
+		[ "$seen" != - ] && json_add_string seen "$seen"
+		json_close_object
+	done <<-EOF
+	$(cat "$STATE/reports" 2>/dev/null)
+	EOF
+	json_close_array
+
 	json_dump
+}
+
+# seconds from the unix time $1 to $now
+since() {
+	s=$((now - $1))
+	[ "$s" -ge 0 ] || s=0
+	echo "$s"
 }
 
 case "$1" in

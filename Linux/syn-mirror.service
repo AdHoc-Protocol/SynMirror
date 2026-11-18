@@ -5,13 +5,14 @@ After=network-online.target nftables.service iptables.service firewalld.service 
 Wants=network-online.target
 
 [Service]
-# the rules, then `give`, which answers the requests for a port; a reload loads the rules again and `give` reads the settings
-# again - the meetings going on go on
+# the rules, then `give`, which answers the requests for a port, keeps the records and writes the reports; a reload loads the
+# rules again and `give` reads the settings
+# again - the meetings going on go on. ${FIXED} and ${RECORDS}: one argument each, the spaces in them too
 Type=simple
 EnvironmentFile=/etc/syn-mirror.conf
-ExecStartPre=/usr/libexec/syn-mirror/rules load ${PASSWORD} ${FIRST} ${LAST} ${WAIT} ${TRIES} ${BLOCK} ${GUARD} ${SHORT} ${GUESSES}
+ExecStartPre=/usr/libexec/syn-mirror/rules load ${PASSWORD} ${FIRST} ${LAST} ${WAIT} ${TRIES} ${BLOCK} ${GUARD} ${SHORT} ${GUESSES} ${FIXED} ${RECORDS}
 ExecStart=/usr/bin/perl /usr/libexec/syn-mirror/give.pl
-ExecReload=/usr/libexec/syn-mirror/rules load ${PASSWORD} ${FIRST} ${LAST} ${WAIT} ${TRIES} ${BLOCK} ${GUARD} ${SHORT} ${GUESSES}
+ExecReload=/usr/libexec/syn-mirror/rules load ${PASSWORD} ${FIRST} ${LAST} ${WAIT} ${TRIES} ${BLOCK} ${GUARD} ${SHORT} ${GUESSES} ${FIXED} ${RECORDS}
 ExecReload=/bin/kill -HUP $MAINPID
 ExecStopPost=/usr/libexec/syn-mirror/rules unload
 Restart=on-failure

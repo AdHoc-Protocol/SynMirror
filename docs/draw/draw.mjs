@@ -333,3 +333,259 @@ function save(file, svg) {
     write(part(svg, "--bad"), 500, 560, "✗ The SYN of the client as it was, from 192.0.2.44:31000, would be dropped: the server never sent there", 23);
     save("nat", svg);
 }
+
+// ── a meeting point whose address changes: it writes it into a record of one of a fixed address; the server reads it there, then
+// meets as always; the address changes, written again at once, read again - the same port at the new address ──
+{
+    const STEPS = 6, EACH = 3, CYCLE = STEPS * EACH;
+    const more = `.step { opacity: .55; animation: lit ${CYCLE}s infinite; }\n`
+        + Array.from({ length: STEPS }, (_, i) => `#change-${i} { animation-delay: ${i * EACH - CYCLE}s; }\n`).join("")
+        + `@keyframes lit { 0%, ${(100 / STEPS) - 0.5}% { opacity: 1; } ${100 / STEPS}%, 100% { opacity: .55; } }\n`;
+    const { svg, defs, rc } = frame("SYN Mirror: a meeting point whose address changes", 1000, 860, more);
+    const A = 100, S = 380, D = 640, B = 900, TOP = 170, BOTTOM = 840;
+
+    const a = part(svg, "--a");
+    monitor(rc, el("g", { transform: `translate(${A - 866 * 0.42} ${18 - 134 * 0.42}) scale(0.42)` }, a), ["> server", "", "", "waits"]);
+    write(a, A, 128, "Server", 24);
+    write(a, A, 150, "has the line, reads, knocks", 16, "small");
+    const s = part(svg, "--meet");
+    router(rc, s, S - 32, 64, "", 400);
+    write(s, S, 128, "meeting point S", 24);
+    write(s, S, 150, "a fixed address: keeps the record", 16, "small");
+    const d = part(svg, "--meet", { class: "alive" });
+    router(rc, d, D - 32, 64, "", 410);
+    write(d, D, 128, "meeting point D", 24);
+    write(d, D, 150, "its address changes", 16, "small");
+    const b = part(svg, "--b");
+    laptop(rc, el("g", { transform: `translate(${B - 158 * 0.42} ${22 - 146 * 0.42}) scale(0.42)` }, b), "");
+    write(b, B, 128, "Client", 24);
+    write(b, B, 150, "connects, as to any address", 16, "small");
+    for (const [x, seed] of [[A, 420], [S, 422], [D, 424], [B, 426]])
+        outline(svg, rc.line(x, TOP, x, BOTTOM, { ...PEN, strokeWidth: 1.6, strokeLineDash: [6, 8], seed }), "o life");
+
+    const step = (i, pen) => part(svg, pen, { id: `change-${i}`, class: "step" });
+
+    // 1: D writes its address
+    let g = step(0, "--meet");
+    write(g, (S + D) / 2, 184, "① D writes: its write key + the port 41000", 19);
+    arrow(rc, g, D, 196, S, 196, 430);
+    arrow(rc, g, S, 228, D, 228, 432, { dash: true });
+    write(g, (S + D) / 2, 252, "the answer: you are 198.51.100.20", 17, "small");
+    write(g, S - 14, 290, "record: 198.51.100.20, port 41000, just now", 17, "", "end");
+    write(g, D + 14, 290, "again each 20 s, and at once when its address changes", 16, "small", "start");
+
+    // 2: the server reads it
+    g = step(1, "--a");
+    write(g, (A + S) / 2, 330, "② The server reads: its read key", 19);
+    arrow(rc, g, A, 342, S, 342, 440);
+    arrow(rc, g, S, 374, A, 374, 442, { dash: true });
+    write(g, (A + S) / 2, 398, "198.51.100.20, port 41000, 0 min old", 17, "small");
+
+    // 3: the meeting, as always, at that address
+    g = step(2, "--a");
+    write(g, (A + D) / 2 + 60, 438, "③ It knocks at 198.51.100.20:41000 and dials it: the meeting, as always", 19);
+    arrow(rc, g, A, 450, D, 450, 450);
+    const bg = part(g, "--b");
+    arrow(rc, bg, B, 486, D, 486, 452);
+    write(bg, (D + B) / 2, 478, "198.51.100.20:41000", 16, "small");
+    el("path", { id: "met-1", d: `M ${D} 510 L ${A} 510`, fill: "none" }, defs);
+    outline(bg, rc.line(A, 510, D, 510, { ...PEN, strokeWidth: 2.4, seed: 454 }));
+    outline(bg, rc.line(D, 510, B, 510, { ...PEN, strokeWidth: 2.4, seed: 456 }));
+    pulses(bg, "met-1", 3, 2.6, true);
+
+    // 4: the address of D changes; it writes at once
+    g = step(3, "--meet");
+    write(g, D, 560, "④ The provider gives D another address: 203.0.113.77", 19);
+    arrow(rc, g, D, 576, S, 576, 460);
+    write(g, S - 14, 604, "record: 203.0.113.77, port 41000", 17, "", "end");
+    write(g, (S + D) / 2 + 30, 604, "written at once", 16, "small");
+
+    // 5: the server reads again
+    g = step(4, "--a");
+    write(g, (A + S) / 2, 648, "⑤ The server reads again, each 30 s", 19);
+    arrow(rc, g, A, 660, S, 660, 470);
+    arrow(rc, g, S, 690, A, 690, 472, { dash: true });
+    write(g, (A + S) / 2, 714, "203.0.113.77, port 41000", 17, "small");
+
+    // 6: the same port at the new address
+    g = step(5, "--a");
+    write(g, (A + D) / 2 + 60, 754, "⑥ It knocks at 203.0.113.77:41000: the same port, D kept it", 19);
+    arrow(rc, g, A, 766, D, 766, 480);
+    const bg2 = part(g, "--b");
+    arrow(rc, bg2, B, 800, D, 800, 482);
+    write(bg2, (D + B) / 2, 792, "203.0.113.77:41000", 16, "small");
+    write(g, (A + D) / 2, 826, "the server shows the client its new line", 17, "small");
+    save("changing", svg);
+}
+
+// ── the lines: what each part of them is ──
+{
+    const { svg, rc } = frame("SYN Mirror: the lines, part by part", 1000, 720);
+    write(svg, 500, 44, "The lines the page of the meeting point copies: each part, what it is", 24);
+    const CW = 11.2, X = 50;
+    let seed = 500;
+
+    /** A line at `y`: its parts [ text, pen, label ], each underlined by hand and named under it; `title` above. */
+    const line = (y, title, parts) => {
+        write(svg, X, y - 30, title, 20, "", "start");
+        let x = X;
+        parts.forEach(([text, pen, label], i) => {
+            const g = part(svg, pen);
+            const w = text.length * CW;
+            el("text", { x, y, class: "mono", textLength: w, lengthAdjust: "spacingAndGlyphs", style: "font-size: 19px; fill: var(--pen)" }, g, text);
+            if (label) {
+                outline(g, rc.line(x + 2, y + 9, x + w - 2, y + 9, { ...PEN, strokeWidth: 1.6, seed: seed++ }));
+                write(g, x + w / 2, y + 30 + (i % 2) * 20, label, 15, "", "middle");
+            }
+            x += w;
+        });
+    };
+
+    line(116, "A port given at each start, the meeting point at a fixed address", [
+        ["Tr7kQ2xZp4Lm9sWd", "--a", "the password: 16"], ["@", "--muted", "ask for a port"], ["203.0.113.7", "--meet", "the meeting point"],
+        [":40000", "--meet", "its port of requests"]]);
+    line(256, "A fixed port: always the same, its key opens it", [
+        ["Fx2pL8wNq7Rk3mZa", "--a", "the key of the port: 16"], ["=", "--muted", "knock at once, ask nothing"], ["203.0.113.7", "--meet", "the meeting point"],
+        [":41000", "--meet", "the fixed port"]]);
+    line(396, "The meeting point's address changes: read it where its record is kept", [
+        ["Fx2pL8wNq7Rk3mZa", "--a", "password or key"], ["=", "--muted", "@ or =, as above"], ["Rk8mP2qLx3Vb7NtY", "--b", "a read key: 16"],
+        ["@198.51.100.9:40000", "--meet", "S: keeps the record"], [",", "--muted", "else"], ["Hx4nT7wAe2Kq9VsM@…", "--b", "another S, if S does not answer"]]);
+    line(536, "For the meeting point whose address changes: where it writes it", [
+        ["Wk3vB9xQm5Tz2Lpe", "--meet", "the write key: 16"], ["/", "--muted", "and"], ["Rk8mP2qLx3Vb7NtY", "--b", "a read key: for its lines"],
+        ["@198.51.100.9:40000", "--meet", "S, which keeps the record"]]);
+
+    write(part(svg, "--b"), 500, 640, "The client gets only an address and a port: 203.0.113.7:41000 - nothing else, nothing installed", 21);
+    write(svg, 500, 676, "The keys are letters and digits: a line goes into a message, a console, a field, as it is", 18, "small");
+    save("lines", svg);
+}
+
+// ── a port given at each start, and a fixed one: what the server sends, what the client gets ──
+{
+    const { svg, rc } = frame("SYN Mirror: a port given at each start, and a fixed port", 1000, 640);
+    write(svg, 500, 44, "Two ways to a port of meeting", 26);
+    const L = 250, R = 750;
+    write(part(svg, "--a"), L, 92, "A port given at each start", 24);
+    write(svg, L, 116, "the line: password@meeting point:40000", 17, "small");
+    write(part(svg, "--a"), R, 92, "A fixed port", 24);
+    write(svg, R, 116, "the line: key=meeting point:41000", 17, "small");
+    outline(svg, rc.line(500, 80, 500, 560, { ...PEN, strokeWidth: 1.4, strokeLineDash: [6, 8], seed: 600 }), "o life");
+
+    /** A box of a step at `y`, its words in it; its bottom returned. */
+    const box = (pen, x, y, w, lines, seed) => {
+        const g = part(svg, pen);
+        outline(g, rc.rectangle(x - w / 2, y, w, 18 + lines.length * 22, { ...PEN, fill: "#fff", fillStyle: "solid", seed }), "o card");
+        lines.forEach((t, i) => write(g, x, y + 28 + i * 22, t, i ? 16 : 19, i ? "small" : ""));
+        return y + 18 + lines.length * 22;
+    };
+    const down = (x, y1, y2, seed) => arrow(rc, svg, x, y1 + 4, x, y2 - 4, seed, { width: 1.8 });
+
+    let y = box("--a", L, 140, 380, ["① ask: password + id → 40000", "24 bytes"], 610);
+    down(L, y, 232, 612);
+    y = box("--meet", L, 232, 380, ["② a free port: 41933", "2 bytes back, given to the id"], 614);
+    down(L, y, 324, 616);
+    y = box("--a", L, 324, 380, ["③ knock: password + id → 41933", "24 bytes, every second"], 618);
+    down(L, y, 416, 620);
+    box("--b", L, 416, 380, ["the client: 203.0.113.7:41933", "sent to it by the server"], 622);
+    write(part(svg, "--bad"), L, 516, "↻ the next start: another port, another line", 19);
+    write(svg, L, 542, "a minute after the server stops, the port is given to others", 16, "small");
+
+    y = box("--a", R, 140, 380, ["① knock: the key → 41000", "16 bytes, every second; nothing asked"], 630);
+    write(part(svg, "--meet"), R, 290, "the port is set aside for the key", 17, "small");
+    down(R, y, 416, 632);
+    box("--b", R, 416, 380, ["the client: 203.0.113.7:41000", "kept once, in its program"], 634);
+    write(part(svg, "--b"), R, 516, "↻ the next start: the same port, the same line", 19);
+    write(svg, R, 542, "nobody else gets it, ever; closed while the server does not knock", 16, "small");
+
+    write(svg, 500, 604, "Both: the server dials the port every second, the client dials it once - the meeting is the same", 20);
+    save("fixed", svg);
+}
+
+// ── how the server finds the meeting point whose address changes: the reads in turn, the freshest, again each 30 s ──
+{
+    const { svg, rc } = frame("SYN Mirror: how the server finds a meeting point whose address changes", 1000, 760);
+    write(svg, 500, 44, "How the server finds a meeting point whose address changes", 26);
+
+    /** A box: a step ( card ) or a question ( diamond ), `x` its middle, `y` its top. */
+    const step = (pen, x, y, w, h, lines, seed, diamond = false) => {
+        const g = part(svg, pen);
+        if (diamond) outline(g, rc.polygon([[x, y], [x + w / 2, y + h / 2], [x, y + h], [x - w / 2, y + h / 2]], { ...PEN, fill: "#fff", fillStyle: "solid", seed }), "o card");
+        else outline(g, rc.rectangle(x - w / 2, y, w, h, { ...PEN, fill: "#fff", fillStyle: "solid", seed }), "o card");
+        const top = y + h / 2 - (lines.length - 1) * 11 + 6;
+        lines.forEach((t, i) => write(g, x, top + i * 22, t, i ? 15 : 18, i ? "small" : ""));
+    };
+    const label = (x, y, t, anchor = "middle") => write(svg, x, y, t, 16, "small", anchor);
+    const go = (x1, y1, x2, y2, seed) => arrow(rc, svg, x1, y1, x2, y2, seed, { width: 1.8 });
+
+    step("--a", 500, 76, 440, 56, ["Read: the next read key@S of the line", "UDP, 16 bytes; up to 3 tries, 1 s each"], 700);
+    go(500, 134, 500, 166, 702);
+    step("--meet", 500, 168, 280, 110, ["S answered?", "7 bytes"], 704, true);
+    // no answer: another S, or none
+    go(640, 223, 748, 223, 706);
+    label(694, 214, "no");
+    step("--meet", 860, 196, 220, 56, ["Another S in the line?"], 708);
+    go(860, 194, 860, 120, 710);
+    go(860, 104, 724, 104, 712);
+    label(872, 160, "yes: read it", "start");
+    go(860, 254, 860, 316, 714);
+    label(872, 290, "no", "start");
+    step("--a", 860, 318, 220, 80, ["None fresh: the freshest", "none at all: say so,", "read again in 5 s"], 716);
+    // an answer: how fresh
+    go(500, 280, 500, 318, 718);
+    label(512, 304, "yes", "start");
+    step("--meet", 500, 320, 300, 110, ["Written in the last 2 min?", "its 7th byte: the minutes"], 720, true);
+    go(350, 375, 246, 375, 722);
+    label(298, 366, "no: kept");
+    step("--a", 140, 348, 200, 56, ["Ask the next S", "the same way"], 724);
+    go(140, 346, 140, 120, 726);
+    go(140, 104, 276, 104, 728);
+    go(500, 432, 500, 470, 730);
+    label(512, 456, "yes", "start");
+    go(860, 400, 704, 486, 732);
+
+    step("--a", 500, 472, 400, 66, ["The address and the port of the meeting point", "@: ask it for a port, the same id   =: knock the key"], 734);
+    go(500, 540, 500, 574, 736);
+    step("--a", 500, 576, 400, 56, ["Knock and dial, every second", "from the same local port"], 738);
+    go(500, 634, 500, 668, 740);
+    step("--a", 500, 670, 400, 56, ["30 s later: read again, from the top", "moved: there with the same id or key; a new line"], 742);
+    outline(svg, rc.path("M 300 698 C 40 698 40 104 136 104", { ...PEN, strokeWidth: 1.8, strokeLineDash: [8, 7], seed: 744 }));
+    write(svg, 66, 600, "each 30 s", 16, "small", "start");
+    save("reading", svg);
+}
+
+// ── the packets, byte by byte, and what the meeting point tells by their length ──
+{
+    const { svg, rc } = frame("SYN Mirror: the packets, byte by byte", 1000, 690);
+    write(svg, 500, 44, "Every packet: UDP, its payload alone - told apart by its length and its first 16 bytes", 23);
+    const X = 290, B = 10;
+    let seed = 800;
+
+    /** A packet at `y`: its fields [ bytes, words, pen ], as wide as their bytes; the name on the left, the answer on the right. */
+    const packet = (y, name, to, fields, answer) => {
+        write(svg, 40, y + 22, name, 19, "", "start");
+        write(svg, 40, y + 44, to, 15, "small", "start");
+        let x = X;
+        for (const [n, words, pen] of fields) {
+            const g = part(svg, pen);
+            const w = words ? Math.max(n * B, 46) : Math.max(n * B, 18);
+            outline(g, rc.rectangle(x, y + 4, w, 34, { ...PEN, strokeWidth: 1.6, fill: "#fff", fillStyle: "solid", seed: seed++ }), "o card");
+            write(g, x + w / 2, y + 27, words, 15);
+            write(svg, x + w / 2, y + 56, `${n}`, 13, "small");
+            x += w;
+        }
+        write(svg, x + 12, y + 27, `= ${fields.reduce((s, f) => s + f[0], 0)} bytes`, 16, "", "start");
+        write(part(svg, answer[1]), 960, y + 27, answer[0], 15, "", "end");
+    };
+    const none = ["no answer", "--muted"];
+    packet(78, "Ask for a port", "→ its port of requests", [[16, "password", "--a"], [8, "id", "--a"]], ["← 2: the port", "--meet"]);
+    packet(146, "Knock", "→ the port of meeting", [[16, "password", "--a"], [8, "id", "--a"]], none);
+    packet(214, "Hold", "→ the port of meeting", [[16, "password", "--a"], [8, "id", "--a"], [1, "", "--muted"]], none);
+    packet(282, "Knock: fixed port", "→ the fixed port", [[16, "its key", "--a"]], none);
+    packet(350, "Hold: fixed port", "→ the fixed port", [[16, "its key", "--a"], [1, "", "--muted"]], none);
+    packet(418, "Write: D → S", "→ the port of requests of S", [[16, "write key", "--meet"], [2, "port", "--meet"]], ["← 4: the address seen", "--meet"]);
+    packet(486, "Read: server → S", "→ the port of requests of S", [[16, "read key", "--b"]], ["← 7: address, port, minutes", "--meet"]);
+
+    write(svg, 500, 586, "A wrong one - another length, a key not of the settings - gets no answer, and counts as a wrong password", 19);
+    write(svg, 500, 616, "Each answer is shorter than its request: the meeting point multiplies the traffic of nobody", 17, "small");
+    write(svg, 500, 644, "A port: 2 bytes, high first · an address: 4 bytes · the id: 8 random bytes of the server, the same in all its packets", 17, "small");
+    save("packets", svg);
+}
